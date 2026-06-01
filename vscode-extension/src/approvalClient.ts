@@ -135,7 +135,7 @@ export class ApprovalClient {
             timeout?: number;
         }
     ): Promise<boolean> {
-        const config = vscode.workspace.getConfiguration('gatekeeper');
+        const config = vscode.workspace.getConfiguration('telegramApproval');
         
         if (!config.get<boolean>('enabled')) {
             // If disabled, auto-approve

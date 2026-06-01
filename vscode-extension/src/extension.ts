@@ -276,13 +276,13 @@ async function showLogs() {
 }
 
 async function startBot() {
-    const config = vscode.workspace.getConfiguration('gatekeeper');
+    const config = vscode.workspace.getConfiguration('telegramApproval');
     const botPath = config.get<string>('botPath');
     
     if (!botPath) {
         const result = await vscode.window.showInputBox({
-            prompt: 'Enter the path to the GateKeeper bot directory',
-            placeHolder: '/path/to/gatekeeper'
+            prompt: 'Enter the path to the telegram-approval bot directory',
+            placeHolder: '/path/to/telegram-approval'
         });
         
         if (result) {
@@ -295,20 +295,20 @@ async function startBot() {
     const finalPath = config.get<string>('botPath');
     
     const terminal = vscode.window.createTerminal({
-        name: 'GateKeeper Server',
+        name: 'Telegram Approval Bot',
         cwd: finalPath,
     });
     
     terminal.show();
     terminal.sendText('source .venv/bin/activate && python bot.py');
     
-    log(`Started server from: ${finalPath}`);
-    vscode.window.showInformationMessage('Starting GateKeeper server...');
+    log(`Started bot from: ${finalPath}`);
+    vscode.window.showInformationMessage('Starting Telegram Approval Bot...');
 }
 
 async function runWithApproval() {
     const command = await vscode.window.showInputBox({
-        prompt: 'Enter command to run with GateKeeper approval',
+        prompt: 'Enter command to run with Telegram approval',
         placeHolder: 'npm install'
     });
     
@@ -329,7 +329,7 @@ async function runWithApproval() {
 }
 
 async function manageAutoApprovePatterns() {
-    const config = vscode.workspace.getConfiguration('gatekeeper');
+    const config = vscode.workspace.getConfiguration('telegramApproval');
     const patterns = config.get<string[]>('autoApprovePatterns') || [];
     
     const options = [
@@ -388,21 +388,21 @@ async function manageAutoApprovePatterns() {
 }
 
 async function enable() {
-    const config = vscode.workspace.getConfiguration('gatekeeper');
+    const config = vscode.workspace.getConfiguration('telegramApproval');
     await config.update('enabled', true, true);
-    vscode.window.showInformationMessage('GateKeeper enabled');
+    vscode.window.showInformationMessage('Telegram Command Approval enabled');
 }
 
 async function disable() {
-    const config = vscode.workspace.getConfiguration('gatekeeper');
+    const config = vscode.workspace.getConfiguration('telegramApproval');
     await config.update('enabled', false, true);
-    vscode.window.showInformationMessage('GateKeeper disabled');
+    vscode.window.showInformationMessage('Telegram Command Approval disabled');
 }
 
 export function deactivate() {
     stopHealthCheckPolling();
     stopBotProcess();
-    log('GateKeeper extension deactivated');
+    log('Telegram Command Approval extension deactivated');
 }
 
 // Export for use by other extensions or Copilot integration
