@@ -12,6 +12,7 @@ let healthCheckInterval: NodeJS.Timeout | undefined;
 let pendingPollInterval: NodeJS.Timeout | undefined;
 let sidebarProvider: SidebarViewProvider;
 let shownNotifications: Set<string> = new Set();
+let activeQuickPicks: Map<string, vscode.QuickPick<vscode.QuickPickItem>> = new Map();
 
 function log(message: string, level: 'info' | 'warn' | 'error' = 'info') {
     const timestamp = new Date().toISOString();
@@ -158,6 +159,15 @@ function startPendingPoll() {
             for (const id of shownNotifications) {
                 if (!pendingIds.has(id)) {
                     shownNotifications.delete(id);
+                    // Close the QuickPick if it's still open (resolved via Telegram)
+                    const quickPick = activeQuickPicks.get(id);
+                    if (quickPick) {
+                        log(`Request ${id} resolved externally, closing QuickPick`);
+                        quickPick.hide();
+                        quickPick.dispose();
+                        activeQuickPicks.delete(id);
+                        vscode.window.showInformationMessage('✅ Resolved via Telegram');
+                    }
                 }
             }
             
@@ -194,62 +204,86 @@ async function showApprovalNotification(req: PendingRequest) {
         ? (req.command || '').substring(0, 60) + '...' 
         : (req.command || '');
     
-    const message = req.goal 
-        ? `🔐 ${req.goal}\n\n${cmdPreview}`
-        : `🔐 Command approval:\n\n${cmdPreview}`;
+    const title = req.goal 
+        ? `🔐 ${req.goal}`
+        : '🔐 Command Approval';
     
-    log(`Showing notification for request: ${req.requestId}`);
+    log(`Showing QuickPick for request: ${req.requestId}`);
     
-    const action = await vscode.window.showInformationMessage(
-        message,
-        { modal: false },
-        '✅ Approve',
-        '❌ Reject',
-        '👁 Details'
-    );
+    // Create QuickPick for programmatic control (can be closed when resolved via Telegram)
+    const quickPick = vscode.window.createQuickPick();
+    quickPick.title = title;
+    quickPick.placeholder = cmdPreview;
+    quickPick.items = [
+        { label: '✅ Approve', description: 'Allow this command to run' },
+        { label: '❌ Reject', description: 'Block this command' },
+        { label: '👁 Details', description: 'View full command' }
+    ];
+    quickPick.ignoreFocusOut = true;
     
-    // Request might already be resolved by Telegram
-    if (!shownNotifications.has(req.requestId)) {
-        return;
-    }
+    // Store reference so we can close it if resolved via Telegram
+    activeQuickPicks.set(req.requestId, quickPick);
     
-    if (action === '✅ Approve') {
-        const success = await approvalClient.localApprove(req.requestId);
-        if (success) {
-            log(`Request ${req.requestId} approved via VS Code`);
-            vscode.window.showInformationMessage('✅ Command approved');
-        } else {
-            vscode.window.showWarningMessage('⚠️ Already resolved (possibly via Telegram)');
+    // Handle selection
+    quickPick.onDidAccept(async () => {
+        const selected = quickPick.selectedItems[0];
+        if (!selected) return;
+        
+        quickPick.hide();
+        quickPick.dispose();
+        activeQuickPicks.delete(req.requestId);
+        
+        // Request might already be resolved by Telegram
+        if (!shownNotifications.has(req.requestId)) {
+            return;
         }
-        shownNotifications.delete(req.requestId);
-    } else if (action === '❌ Reject') {
-        const success = await approvalClient.localReject(req.requestId);
-        if (success) {
-            log(`Request ${req.requestId} rejected via VS Code`);
-            vscode.window.showInformationMessage('❌ Command rejected');
-        } else {
-            vscode.window.showWarningMessage('⚠️ Already resolved (possibly via Telegram)');
+        
+        if (selected.label === '✅ Approve') {
+            const success = await approvalClient.localApprove(req.requestId);
+            if (success) {
+                log(`Request ${req.requestId} approved via VS Code`);
+                vscode.window.showInformationMessage('✅ Command approved');
+            } else {
+                vscode.window.showWarningMessage('⚠️ Already resolved (possibly via Telegram)');
+            }
+            shownNotifications.delete(req.requestId);
+        } else if (selected.label === '❌ Reject') {
+            const success = await approvalClient.localReject(req.requestId);
+            if (success) {
+                log(`Request ${req.requestId} rejected via VS Code`);
+                vscode.window.showInformationMessage('❌ Command rejected');
+            } else {
+                vscode.window.showWarningMessage('⚠️ Already resolved (possibly via Telegram)');
+            }
+            shownNotifications.delete(req.requestId);
+        } else if (selected.label === '👁 Details') {
+            // Show full command in output channel
+            outputChannel.appendLine('\n--- Approval Request Details ---');
+            outputChannel.appendLine(`Request ID: ${req.requestId}`);
+            outputChannel.appendLine(`Goal: ${req.goal || 'N/A'}`);
+            outputChannel.appendLine(`Explanation: ${req.explanation || 'N/A'}`);
+            outputChannel.appendLine(`Command:\n${req.command || 'N/A'}`);
+            outputChannel.appendLine('---\n');
+            outputChannel.show();
+            // Re-show the notification
+            shownNotifications.delete(req.requestId);
         }
-        shownNotifications.delete(req.requestId);
-    } else if (action === '👁 Details') {
-        // Show full command in output channel
-        outputChannel.appendLine('\n--- Approval Request Details ---');
-        outputChannel.appendLine(`Request ID: ${req.requestId}`);
-        outputChannel.appendLine(`Goal: ${req.goal || 'N/A'}`);
-        outputChannel.appendLine(`Explanation: ${req.explanation || 'N/A'}`);
-        outputChannel.appendLine(`Command:\n${req.command || 'N/A'}`);
-        outputChannel.appendLine('---\n');
-        outputChannel.show();
-        // Re-show the notification
-        shownNotifications.delete(req.requestId);
-    }
+    });
+    
+    // Handle dismissal
+    quickPick.onDidHide(() => {
+        activeQuickPicks.delete(req.requestId);
+        quickPick.dispose();
+    });
+    
+    quickPick.show();
 }
 
 async function showQuestionNotification(req: PendingRequest) {
     const question = req.question || 'Question from Copilot';
     const options = req.options || [];
     
-    log(`Showing question notification for request: ${req.requestId}`);
+    log(`Showing question QuickPick for request: ${req.requestId}`);
     
     // Build quick pick items from options
     const items: vscode.QuickPickItem[] = options.map(opt => ({
@@ -263,52 +297,64 @@ async function showQuestionNotification(req: PendingRequest) {
         description: 'Enter your own response'
     });
     
-    // Show quick pick with options
-    const contextText = req.context ? `\n\n${req.context}` : '';
-    const selected = await vscode.window.showQuickPick(items, {
-        placeHolder: question + contextText,
-        title: '💬 Question from Copilot',
-        ignoreFocusOut: true
-    });
+    // Create QuickPick for programmatic control
+    const quickPick = vscode.window.createQuickPick();
+    quickPick.title = '💬 Question from Copilot';
+    quickPick.placeholder = question + (req.context ? ` (${req.context})` : '');
+    quickPick.items = items;
+    quickPick.ignoreFocusOut = true;
     
-    // Request might already be resolved by Telegram
-    if (!shownNotifications.has(req.requestId)) {
-        return;
-    }
+    // Store reference so we can close it if resolved via Telegram
+    activeQuickPicks.set(req.requestId, quickPick);
     
-    if (!selected) {
-        // User cancelled - re-show later
-        shownNotifications.delete(req.requestId);
-        return;
-    }
-    
-    let answer: string;
-    
-    if (selected.label === '✏️ Type custom answer...') {
-        // Show input box for custom answer
-        const customAnswer = await vscode.window.showInputBox({
-            prompt: question,
-            placeHolder: 'Type your answer...',
-            ignoreFocusOut: true
-        });
+    quickPick.onDidAccept(async () => {
+        const selected = quickPick.selectedItems[0];
+        if (!selected) return;
         
-        if (!customAnswer) {
-            shownNotifications.delete(req.requestId);
+        quickPick.hide();
+        quickPick.dispose();
+        activeQuickPicks.delete(req.requestId);
+        
+        // Request might already be resolved by Telegram
+        if (!shownNotifications.has(req.requestId)) {
             return;
         }
-        answer = customAnswer;
-    } else {
-        answer = selected.label;
-    }
+        
+        let answer: string;
+        
+        if (selected.label === '✏️ Type custom answer...') {
+            // Show input box for custom answer
+            const customAnswer = await vscode.window.showInputBox({
+                prompt: question,
+                placeHolder: 'Type your answer...',
+                ignoreFocusOut: true
+            });
+            
+            if (!customAnswer) {
+                shownNotifications.delete(req.requestId);
+                return;
+            }
+            answer = customAnswer;
+        } else {
+            answer = selected.label;
+        }
+        
+        const success = await approvalClient.localAnswer(req.requestId, answer);
+        if (success) {
+            log(`Question ${req.requestId} answered via VS Code: ${answer}`);
+            vscode.window.showInformationMessage(`✅ Answered: ${answer}`);
+        } else {
+            vscode.window.showWarningMessage('⚠️ Already answered (possibly via Telegram)');
+        }
+        shownNotifications.delete(req.requestId);
+    });
     
-    const success = await approvalClient.localAnswer(req.requestId, answer);
-    if (success) {
-        log(`Question ${req.requestId} answered via VS Code: ${answer}`);
-        vscode.window.showInformationMessage(`✅ Answered: ${answer}`);
-    } else {
-        vscode.window.showWarningMessage('⚠️ Already answered (possibly via Telegram)');
-    }
-    shownNotifications.delete(req.requestId);
+    quickPick.onDidHide(() => {
+        activeQuickPicks.delete(req.requestId);
+        quickPick.dispose();
+    });
+    
+    quickPick.show();
 }
 
 function updateStatusBarHealth(connected: boolean, pendingCount?: number) {
