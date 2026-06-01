@@ -2,7 +2,7 @@
     "name": "telegram-command-approval",
     "displayName": "Telegram Command Approval",
     "description": "Route VS Code Copilot command approvals to Telegram",
-    "version": "0.3.1",
+    "version": "0.4.1",
     "publisher": "technologica",
     "repository": {
         "type": "git",
