@@ -2,12 +2,14 @@ import * as vscode from 'vscode';
 import { ApprovalClient, setLogger } from './approvalClient';
 import { CommandInterceptor } from './commandInterceptor';
 import { SetupPanel, setOutputChannel, stopBotProcess, isBotRunning } from './setupPanel';
+import { SidebarViewProvider } from './sidebarWebviewProvider';
 
 let approvalClient: ApprovalClient;
 let commandInterceptor: CommandInterceptor;
 let statusBarItem: vscode.StatusBarItem;
 let outputChannel: vscode.OutputChannel;
 let healthCheckInterval: NodeJS.Timeout | undefined;
+let sidebarProvider: SidebarViewProvider;
 
 function log(message: string, level: 'info' | 'warn' | 'error' = 'info') {
     const timestamp = new Date().toISOString();
@@ -31,6 +33,13 @@ export function activate(context: vscode.ExtensionContext) {
     
     // Initialize command interceptor
     commandInterceptor = new CommandInterceptor(approvalClient);
+
+    // Initialize sidebar webview provider
+    sidebarProvider = new SidebarViewProvider(context);
+    
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(SidebarViewProvider.viewType, sidebarProvider)
+    );
 
     // Create status bar item
     statusBarItem = vscode.window.createStatusBarItem(
@@ -126,6 +135,11 @@ function stopHealthCheckPolling() {
 function updateStatusBarHealth(connected: boolean, pendingCount?: number) {
     const config = vscode.workspace.getConfiguration('telegramApproval');
     const enabled = config.get<boolean>('enabled');
+    const running = isBotRunning();
+    const hasToken = !!(config.get<string>('chatId')); // If chatId is set, assume token is too
+    
+    // Update sidebar
+    sidebarProvider.updateStatus(connected, pendingCount || 0, running || connected, hasToken || connected);
     
     if (!enabled) {
         statusBarItem.text = '$(bell-slash) TG Approval';

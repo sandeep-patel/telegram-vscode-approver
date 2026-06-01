@@ -20,6 +20,7 @@ export class SetupPanel {
     private readonly _extensionUri: vscode.Uri;
     private readonly _context: vscode.ExtensionContext;
     private _disposables: vscode.Disposable[] = [];
+    private _statusInterval: NodeJS.Timeout | undefined;
 
     public static createOrShow(context: vscode.ExtensionContext) {
         const column = vscode.window.activeTextEditor
@@ -76,6 +77,9 @@ export class SetupPanel {
             null,
             this._disposables
         );
+
+        // Periodically refresh status to catch external changes
+        this._statusInterval = setInterval(() => this._sendStatus(), 3000);
     }
 
     private async _sendStatus() {
@@ -83,7 +87,15 @@ export class SetupPanel {
         const token = await this._context.secrets.get('telegramApproval.botToken') || '';
         const chatId = config.get<string>('chatId') || '';
         const port = config.get<number>('httpPort') || 8765;
-        const isRunning = botProcess !== undefined && !botProcess.killed;
+        
+        // Check if we started the bot process
+        const processRunning = botProcess !== undefined && !botProcess.killed;
+        
+        // Also check health endpoint to see if server is responding
+        const serverResponding = await this._checkServerHealth(port);
+        
+        // Server is running if either we started it or something is responding
+        const isRunning = processRunning || serverResponding;
 
         this._panel.webview.postMessage({
             command: 'status',
@@ -92,6 +104,23 @@ export class SetupPanel {
             chatId,
             port,
             isRunning,
+            processRunning, // We started it
+            serverResponding, // Something is responding
+        });
+    }
+
+    private async _checkServerHealth(port: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            const http = require('http');
+            const req = http.request(
+                { hostname: 'localhost', port, path: '/health', method: 'GET', timeout: 2000 },
+                (res: any) => {
+                    resolve(res.statusCode === 200);
+                }
+            );
+            req.on('error', () => resolve(false));
+            req.on('timeout', () => { req.destroy(); resolve(false); });
+            req.end();
         });
     }
 
@@ -191,18 +220,121 @@ export class SetupPanel {
             this._panel.webview.postMessage({ command: 'started' });
             vscode.window.showInformationMessage('✅ Telegram Approval Bot started successfully!');
             log('Bot started successfully');
+            
+            // Auto-register MCP server
+            await this._registerMcpServer(pythonPath, botScriptPath, port);
         }
 
         await this._sendStatus();
     }
 
+    private async _registerMcpServer(_pythonPath: string, _botScriptPath: string, port: number) {
+        try {
+            const fs = await import('fs');
+            const os = await import('os');
+            const path = await import('path');
+            
+            // Use bundled Node.js MCP server from extension
+            const extensionPath = this._context.extensionPath;
+            const mcpServerPath = path.join(extensionPath, 'out', 'mcpServer.js');
+            
+            // Check if MCP server exists
+            if (!fs.existsSync(mcpServerPath)) {
+                log(`Bundled MCP server not found at ${mcpServerPath}`);
+                return;
+            }
+            
+            // Path to VS Code's mcp.json (cross-platform)
+            let mcpConfigPath: string;
+            const platform = os.platform();
+            if (platform === 'darwin') {
+                mcpConfigPath = path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User', 'mcp.json');
+            } else if (platform === 'win32') {
+                mcpConfigPath = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'mcp.json');
+            } else {
+                // Linux
+                mcpConfigPath = path.join(os.homedir(), '.config', 'Code', 'User', 'mcp.json');
+            }
+            
+            // Read existing config or create new
+            let mcpConfig: { servers: Record<string, any>; inputs?: any[] } = { servers: {}, inputs: [] };
+            if (fs.existsSync(mcpConfigPath)) {
+                try {
+                    const content = fs.readFileSync(mcpConfigPath, 'utf8');
+                    mcpConfig = JSON.parse(content);
+                } catch {
+                    log('Failed to parse existing mcp.json, will overwrite');
+                }
+            }
+            
+            // Check if already configured with correct path
+            const existingServer = mcpConfig.servers?.['telegram-approval'];
+            if (existingServer?.args?.[0] === mcpServerPath) {
+                log('MCP server already registered with correct path');
+                return;
+            }
+            
+            // Add/update telegram-approval server using Node.js (no Python needed!)
+            mcpConfig.servers = mcpConfig.servers || {};
+            mcpConfig.servers['telegram-approval'] = {
+                type: 'stdio',
+                command: 'node',
+                args: [mcpServerPath],
+                env: {
+                    TELEGRAM_APPROVAL_URL: `http://localhost:${port}`
+                }
+            };
+            
+            // Ensure directory exists
+            const configDir = path.dirname(mcpConfigPath);
+            if (!fs.existsSync(configDir)) {
+                fs.mkdirSync(configDir, { recursive: true });
+            }
+            
+            // Write config
+            fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, '\t'));
+            log(`Registered bundled MCP server in ${mcpConfigPath}`);
+            
+            vscode.window.showInformationMessage(
+                '🔧 MCP server auto-registered! Reload VS Code to enable run_approved_command.',
+                'Reload Window'
+            ).then(selection => {
+                if (selection === 'Reload Window') {
+                    vscode.commands.executeCommand('workbench.action.reloadWindow');
+                }
+            });
+            
+        } catch (error) {
+            log(`Failed to register MCP server: ${error}`);
+            // Don't show error to user - this is optional functionality
+        }
+    }
+
     private async _stopBot() {
+        const config = vscode.workspace.getConfiguration('telegramApproval');
+        const port = config.get<number>('httpPort') || 8765;
+        
+        // Kill our process if we started it
         if (botProcess && !botProcess.killed) {
             botProcess.kill();
             botProcess = undefined;
-            log('Bot stopped');
-            vscode.window.showInformationMessage('Bot stopped');
+            log('Bot process stopped');
         }
+        
+        // Also try to kill any process on the port (in case started externally)
+        try {
+            const { execSync } = require('child_process');
+            // Find and kill process on the port
+            execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+            log(`Killed any process on port ${port}`);
+        } catch {
+            // Ignore errors
+        }
+        
+        vscode.window.showInformationMessage('Bot stopped');
+        
+        // Wait a moment for the process to die
+        await new Promise(resolve => setTimeout(resolve, 500));
         await this._sendStatus();
     }
 
@@ -617,14 +749,15 @@ export class SetupPanel {
             document.getElementById('success-message').style.display = 'none';
         }
 
-        function updateUI(running, hasToken) {
-            isRunning = running;
+        function updateUI(status) {
+            isRunning = status.isRunning;
             const statusCard = document.getElementById('status-card');
             const startBtn = document.getElementById('start-btn');
             const stopBtn = document.getElementById('stop-btn');
             const testBtn = document.getElementById('test-btn');
 
-            if (running) {
+            if (status.isRunning && status.hasToken) {
+                // Server running and we have config
                 statusCard.className = 'status-card status-running';
                 statusCard.innerHTML = \`
                     <span class="status-icon">🟢</span>
@@ -636,7 +769,23 @@ export class SetupPanel {
                 startBtn.style.display = 'none';
                 stopBtn.style.display = 'block';
                 testBtn.style.display = 'block';
-            } else if (hasToken) {
+            } else if (status.serverResponding && !status.hasToken) {
+                // Something is running on the port but we're not configured
+                statusCard.className = 'status-card status-stopped';
+                statusCard.innerHTML = \`
+                    <span class="status-icon">⚠️</span>
+                    <div class="status-text">
+                        <div class="status-title">Server detected on port</div>
+                        <div class="status-subtitle">Configure your bot details below</div>
+                    </div>
+                \`;
+                startBtn.style.display = 'block';
+                startBtn.textContent = '🚀 Start Approval Server';
+                startBtn.disabled = false;
+                stopBtn.style.display = 'block';
+                testBtn.style.display = 'block';
+            } else if (status.hasToken) {
+                // Configured but not running
                 statusCard.className = 'status-card status-stopped';
                 statusCard.innerHTML = \`
                     <span class="status-icon">🟡</span>
@@ -651,6 +800,7 @@ export class SetupPanel {
                 stopBtn.style.display = 'none';
                 testBtn.style.display = 'none';
             } else {
+                // Not configured
                 statusCard.className = 'status-card status-stopped';
                 statusCard.innerHTML = \`
                     <span class="status-icon">⚪</span>
@@ -673,7 +823,7 @@ export class SetupPanel {
                 case 'status':
                     if (message.chatId) document.getElementById('chatId').value = message.chatId;
                     if (message.port) document.getElementById('port').value = message.port;
-                    updateUI(message.isRunning, message.hasToken);
+                    updateUI(message);
                     break;
                 case 'error':
                     showError(message.message);
@@ -705,6 +855,9 @@ export class SetupPanel {
 
     public dispose() {
         SetupPanel.currentPanel = undefined;
+        if (this._statusInterval) {
+            clearInterval(this._statusInterval);
+        }
         this._panel.dispose();
         while (this._disposables.length) {
             const x = this._disposables.pop();

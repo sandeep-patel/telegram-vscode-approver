@@ -2,8 +2,12 @@
     "name": "telegram-command-approval",
     "displayName": "Telegram Command Approval",
     "description": "Route VS Code Copilot command approvals to Telegram",
-    "version": "0.1.1",
+    "version": "0.3.0",
     "publisher": "technologica",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/user/telegram-approval"
+    },
     "engines": {
         "vscode": "^1.85.0"
     },
@@ -15,6 +19,24 @@
     ],
     "main": "./out/extension.js",
     "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "telegramApproval",
+                    "title": "Telegram Approval",
+                    "icon": "$(bell)"
+                }
+            ]
+        },
+        "views": {
+            "telegramApproval": [
+                {
+                    "id": "telegramApproval.mainView",
+                    "name": "Telegram Approval",
+                    "type": "webview"
+                }
+            ]
+        },
         "commands": [
             {
                 "command": "telegramApproval.setup",
@@ -105,7 +127,9 @@
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",
-        "compile": "tsc -p ./",
+        "compile": "tsc -p ./ && npm run bundle:mcp",
+        "compile:extension": "tsc -p ./",
+        "bundle:mcp": "esbuild src/mcpServer.ts --bundle --platform=node --target=node18 --outfile=out/mcpServer.js --format=cjs",
         "watch": "tsc -watch -p ./",
         "lint": "eslint src --ext ts"
     },
@@ -115,10 +139,15 @@
         "@typescript-eslint/eslint-plugin": "^6.0.0",
         "@typescript-eslint/parser": "^6.0.0",
         "@vscode/vsce": "^3.9.1",
+        "esbuild": "^0.28.0",
         "eslint": "^8.0.0",
         "typescript": "^5.0.0"
     },
     "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.29.0",
         "node-fetch": "^3.3.0"
+    },
+    "allowScripts": {
+        "esbuild@0.28.0": true
     }
 }
