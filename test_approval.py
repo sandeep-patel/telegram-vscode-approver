@@ -4,8 +4,10 @@
 import asyncio
 import aiohttp
 import sys
+import pytest
 
 
+@pytest.mark.asyncio
 async def test_approval():
     """Send a test approval request."""
     url = "http://localhost:8765"
