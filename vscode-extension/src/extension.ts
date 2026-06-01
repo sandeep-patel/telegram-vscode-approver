@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ApprovalClient, setLogger } from './approvalClient';
 import { CommandInterceptor } from './commandInterceptor';
+import { SetupPanel, setOutputChannel, stopBotProcess, isBotRunning } from './setupPanel';
 
 let approvalClient: ApprovalClient;
 let commandInterceptor: CommandInterceptor;
@@ -21,8 +22,9 @@ export function activate(context: vscode.ExtensionContext) {
     
     log('Telegram Command Approval extension activated');
 
-    // Set logger for approval client
+    // Set logger for approval client and setup panel
     setLogger(log);
+    setOutputChannel(outputChannel);
 
     // Initialize the approval client
     approvalClient = new ApprovalClient();
@@ -35,12 +37,13 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.StatusBarAlignment.Right,
         100
     );
-    statusBarItem.command = 'telegramApproval.configure';
+    statusBarItem.command = 'telegramApproval.setup';
     updateStatusBar();
     statusBarItem.show();
 
     // Register commands
     context.subscriptions.push(
+        vscode.commands.registerCommand('telegramApproval.setup', () => SetupPanel.createOrShow(context)),
         vscode.commands.registerCommand('telegramApproval.configure', configure),
         vscode.commands.registerCommand('telegramApproval.testConnection', testConnection),
         vscode.commands.registerCommand('telegramApproval.enable', enable),
@@ -384,6 +387,7 @@ async function disable() {
 
 export function deactivate() {
     stopHealthCheckPolling();
+    stopBotProcess();
     log('Telegram Command Approval extension deactivated');
 }
 

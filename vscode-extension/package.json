@@ -17,6 +17,11 @@
     "contributes": {
         "commands": [
             {
+                "command": "telegramApproval.setup",
+                "title": "Telegram Approval: Setup",
+                "icon": "$(gear)"
+            },
+            {
                 "command": "telegramApproval.configure",
                 "title": "Telegram Approval: Configure"
             },
@@ -79,6 +84,16 @@
                     "type": "string",
                     "default": "",
                     "description": "Path to the telegram-approval bot directory"
+                },
+                "telegramApproval.chatId": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Your Telegram Chat ID (get this by sending /start to your bot)"
+                },
+                "telegramApproval.httpPort": {
+                    "type": "number",
+                    "default": 8765,
+                    "description": "Port for the local approval HTTP server"
                 },
                 "telegramApproval.mcpEnabled": {
                     "type": "boolean",
