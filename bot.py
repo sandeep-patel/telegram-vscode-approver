@@ -333,7 +333,7 @@ def main():
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Extension by user")
 
     return 0
 

@@ -331,7 +331,7 @@ export class SetupPanel {
             // Ignore errors
         }
         
-        vscode.window.showInformationMessage('Bot stopped');
+        vscode.window.showInformationMessage('Extension stopped');
         
         // Wait a moment for the process to die
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -341,7 +341,7 @@ export class SetupPanel {
     private async _testConnection(port: number) {
         try {
             const http = await import('http');
-            const result = await new Promise<boolean>((resolve) => {
+            await new Promise<boolean>((resolve) => {
                 const req = http.request(
                     { hostname: 'localhost', port, path: '/health', method: 'GET', timeout: 3000 },
                     (res) => {
@@ -357,6 +357,10 @@ export class SetupPanel {
                                 });
                                 resolve(true);
                             } catch {
+                                this._panel.webview.postMessage({
+                                    command: 'connectionResult',
+                                    success: false,
+                                });
                                 resolve(false);
                             }
                         });
@@ -371,6 +375,10 @@ export class SetupPanel {
                 });
                 req.on('timeout', () => {
                     req.destroy();
+                    this._panel.webview.postMessage({
+                        command: 'connectionResult',
+                        success: false,
+                    });
                     resolve(false);
                 });
                 req.end();
