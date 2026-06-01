@@ -22,6 +22,21 @@ const APPROVAL_SERVER_URL = process.env.GATEKEEPER_URL || 'http://localhost:8765
 const DEFAULT_TIMEOUT = parseInt(process.env.GATEKEEPER_TIMEOUT || '300', 10);
 
 /**
+ * Check if the approval server is running (quick health check)
+ */
+async function isServerRunning(): Promise<boolean> {
+    try {
+        const response = await httpRequest(`${APPROVAL_SERVER_URL}/health`, {
+            method: 'GET',
+            timeout: 2000, // Quick 2 second timeout
+        });
+        return response.status === 200;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Make an HTTP request (simple wrapper)
  */
 function httpRequest(
@@ -123,7 +138,7 @@ async function runCommand(
 const server = new Server(
     {
         name: 'gatekeeper',
-        version: '0.5.0',
+        version: '0.6.0',
     },
     {
         capabilities: {
@@ -138,10 +153,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'run_approved_command',
             description:
-                'Run a shell command after getting remote approval via GateKeeper. ' +
-                'Use this instead of regular terminal commands when you want ' +
-                'the user to approve from their phone. The command will be sent ' +
-                'to the user and will wait for them to approve or reject.',
+                'Run a shell command with smart approval routing. ' +
+                'If GateKeeper server is running → sends to phone for approval. ' +
+                'If server is not running → executes directly (no approval needed). ' +
+                'Use this for all terminal commands to enable remote approval when desired.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -242,7 +257,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
         }
 
-        // Request approval
+        // Check if server is running
+        const serverRunning = await isServerRunning();
+        
+        if (!serverRunning) {
+            // Server not running - execute directly without approval
+            const result = await runCommand(command, cwd, commandTimeout);
+            
+            const outputParts = [`⚡ Command executed directly (GateKeeper server not running, exit code: ${result.exitCode})`];
+            
+            if (result.stdout.trim()) {
+                outputParts.push(`\n**stdout:**\n\`\`\`\n${result.stdout.trim()}\n\`\`\``);
+            }
+            
+            if (result.stderr.trim()) {
+                outputParts.push(`\n**stderr:**\n\`\`\`\n${result.stderr.trim()}\n\`\`\``);
+            }
+            
+            return {
+                content: [{ type: 'text', text: outputParts.join('\n') }],
+            };
+        }
+
+        // Server running - request approval
         const approved = await requestApproval(command, explanation, goal, approvalTimeout);
 
         if (!approved) {
@@ -284,7 +321,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('Telegram Approval MCP Server running on stdio');
+    console.error('GateKeeper MCP Server running on stdio');
 }
 
 main().catch(console.error);

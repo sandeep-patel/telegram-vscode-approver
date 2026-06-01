@@ -37,6 +37,19 @@ DEFAULT_TIMEOUT = int(os.environ.get("GATEKEEPER_TIMEOUT", "300"))
 server = Server("gatekeeper")
 
 
+async def is_server_running() -> bool:
+    """Check if the approval server is running (quick health check)."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{APPROVAL_SERVER_URL}/health",
+                timeout=aiohttp.ClientTimeout(total=2),  # Quick 2 second timeout
+            ) as response:
+                return response.status == 200
+    except:
+        return False
+
+
 async def request_approval(
     command: str,
     explanation: str = "",
@@ -110,10 +123,10 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="run_approved_command",
             description=(
-                "Run a shell command after getting remote approval via GateKeeper. "
-                "Use this instead of regular terminal commands when you want "
-                "the user to approve from their phone. The command will be sent "
-                "to the user and will wait for them to approve or reject."
+                "Run a shell command with smart approval routing. "
+                "If GateKeeper server is running → sends to phone for approval. "
+                "If server is not running → executes directly (no approval needed). "
+                "Use this for all terminal commands to enable remote approval when desired."
             ),
             inputSchema={
                 "type": "object",
@@ -201,7 +214,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 text="Error: command is required",
             )]
 
-        # Request approval
+        # Check if server is running
+        server_running = await is_server_running()
+        
+        if not server_running:
+            # Server not running - execute directly without approval
+            exit_code, stdout, stderr = await run_command(
+                command=command,
+                cwd=cwd,
+                timeout=command_timeout,
+            )
+            
+            output_parts = [f"⚡ Command executed directly (GateKeeper server not running, exit code: {exit_code})"]
+            
+            if stdout.strip():
+                output_parts.append(f"\n**stdout:**\n```\n{stdout.strip()}\n```")
+            
+            if stderr.strip():
+                output_parts.append(f"\n**stderr:**\n```\n{stderr.strip()}\n```")
+            
+            return [TextContent(
+                type="text",
+                text="\n".join(output_parts),
+            )]
+
+        # Server running - request approval
         approved = await request_approval(
             command=command,
             explanation=explanation,
