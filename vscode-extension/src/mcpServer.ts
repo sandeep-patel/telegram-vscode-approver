@@ -176,10 +176,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'run_approved_command',
             description:
-                'Run a shell command after getting remote approval via GateKeeper. ' +
-                'Use this instead of regular terminal commands when you want ' +
-                'the user to approve from their phone. The command will be sent ' +
-                'to the user and will wait for them to approve or reject.',
+                'Run a shell command with optional approval via GateKeeper. ' +
+                'If the approval server is running, waits for user approval (VS Code first, then Telegram). ' +
+                'If the server is not running, executes the command directly. ' +
+                'Use this as your default terminal command tool - it automatically adapts based on server availability.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -318,7 +318,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
         }
 
-        // Request approval
+        // Check if approval server is running
+        let serverHealthy = false;
+        try {
+            const healthResponse = await httpRequest(`${APPROVAL_SERVER_URL}/health`, {
+                method: 'GET',
+                timeout: 2000,
+            });
+            serverHealthy = healthResponse.status === 200;
+        } catch {
+            serverHealthy = false;
+        }
+
+        // If server is not running, execute command directly without approval
+        if (!serverHealthy) {
+            const result = await runCommand(command, cwd, commandTimeout);
+            const outputParts = [`⚡ Command executed directly (approval server not running, exit code: ${result.exitCode})`];
+            if (result.stdout.trim()) {
+                outputParts.push(`\n**stdout:**\n\`\`\`\n${result.stdout.trim()}\n\`\`\``);
+            }
+            if (result.stderr.trim()) {
+                outputParts.push(`\n**stderr:**\n\`\`\`\n${result.stderr.trim()}\n\`\`\``);
+            }
+            return {
+                content: [{ type: 'text', text: outputParts.join('\n') }],
+            };
+        }
+
+        // Server is running - request approval
         const approved = await requestApproval(command, explanation, goal, approvalTimeout, localDelay);
 
         if (!approved) {

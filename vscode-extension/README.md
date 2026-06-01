@@ -125,6 +125,39 @@ ask_user(
 }
 ```
 
+## Configure Copilot to Use GateKeeper
+
+By default, Copilot uses its built-in terminal tool. To make Copilot always use GateKeeper for command approval, add custom instructions:
+
+### Option 1: User-Level (All Workspaces)
+
+Create `~/.github/copilot-instructions.md`:
+
+```markdown
+## Terminal Commands
+
+Always use `mcp_gatekeeper_run_approved_command` for terminal commands instead of `run_in_terminal`.
+This enables approval flow when the GateKeeper server is running, or executes directly when not.
+```
+
+### Option 2: Workspace-Level (Per Project)
+
+Create `.github/copilot-instructions.md` in your project root:
+
+```markdown
+## Terminal Commands
+
+Always use `mcp_gatekeeper_run_approved_command` for all shell commands.
+```
+
+### Smart Fallback
+
+The `run_approved_command` tool automatically detects server status:
+- **Server running** → Approval flow (VS Code notification → Telegram fallback)
+- **Server not running** → Executes directly (like built-in terminal)
+
+This means you can safely configure Copilot to always use GateKeeper — it gracefully degrades when the server is offline.
+
 ## Status Bar
 
 The status bar shows:
