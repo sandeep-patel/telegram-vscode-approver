@@ -31,6 +31,22 @@
             {
                 "command": "telegramApproval.disable",
                 "title": "Telegram Approval: Disable"
+            },
+            {
+                "command": "telegramApproval.showLogs",
+                "title": "Telegram Approval: Show Logs"
+            },
+            {
+                "command": "telegramApproval.startBot",
+                "title": "Telegram Approval: Start Bot"
+            },
+            {
+                "command": "telegramApproval.runWithApproval",
+                "title": "Telegram Approval: Run Command with Approval"
+            },
+            {
+                "command": "telegramApproval.managePatterns",
+                "title": "Telegram Approval: Manage Auto-Approve Patterns"
             }
         ],
         "configuration": {
@@ -57,7 +73,17 @@
                         "type": "string"
                     },
                     "default": [],
-                    "description": "Regex patterns for commands to auto-approve"
+                    "description": "Regex patterns for commands to auto-approve (e.g., '^ls\\b', '^pwd$')"
+                },
+                "telegramApproval.botPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to the telegram-approval bot directory"
+                },
+                "telegramApproval.mcpEnabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether to use MCP server integration (recommended)"
                 }
             }
         }

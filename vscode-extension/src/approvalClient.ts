@@ -12,6 +12,19 @@ interface HealthResponse {
     pending_approvals: number;
 }
 
+// Logger function that will be set by extension.ts
+let logger: ((message: string, level?: 'info' | 'warn' | 'error') => void) | undefined;
+
+export function setLogger(fn: (message: string, level?: 'info' | 'warn' | 'error') => void) {
+    logger = fn;
+}
+
+function log(message: string, level: 'info' | 'warn' | 'error' = 'info') {
+    if (logger) {
+        logger(message, level);
+    }
+}
+
 export class ApprovalClient {
     private serverUrl: string = 'http://localhost:8765';
     private timeoutSeconds: number = 300;
@@ -69,6 +82,7 @@ export class ApprovalClient {
             );
 
             req.on('error', (e) => {
+                log(`Request error: ${e.message}`, 'error');
                 resolve({
                     ok: false,
                     error: e.message,
@@ -76,6 +90,7 @@ export class ApprovalClient {
             });
 
             req.on('timeout', () => {
+                log('Request timed out', 'warn');
                 req.destroy();
                 resolve({
                     ok: false,
@@ -132,16 +147,17 @@ export class ApprovalClient {
         for (const pattern of patterns) {
             try {
                 if (new RegExp(pattern).test(command)) {
-                    console.log(`Command auto-approved by pattern: ${pattern}`);
+                    log(`Command auto-approved by pattern: ${pattern}`);
                     return true;
                 }
             } catch {
-                // Invalid regex, skip
+                log(`Invalid regex pattern: ${pattern}`, 'warn');
             }
         }
 
         // Generate request ID
         const requestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        log(`Requesting approval for command: ${command.substring(0, 100)}... [${requestId}]`);
 
         // Show notification that approval is pending
         const statusMessage = vscode.window.setStatusBarMessage(
@@ -164,8 +180,10 @@ export class ApprovalClient {
                 const response = result.data as ApprovalResponse;
                 
                 if (response.approved) {
+                    log(`Command approved via Telegram [${requestId}]`);
                     vscode.window.showInformationMessage('✅ Command approved via Telegram');
                 } else {
+                    log(`Command rejected via Telegram [${requestId}]`, 'warn');
                     vscode.window.showWarningMessage('❌ Command rejected via Telegram');
                 }
                 
@@ -173,6 +191,7 @@ export class ApprovalClient {
             }
 
             // Server error or timeout - show error and let user decide
+            log(`Approval failed: ${result.error} [${requestId}]`, 'error');
             const action = await vscode.window.showWarningMessage(
                 `Telegram approval failed: ${result.error}`,
                 'Run Anyway',
@@ -183,6 +202,7 @@ export class ApprovalClient {
 
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            log(`Approval error: ${errorMessage} [${requestId}]`, 'error');
             
             const action = await vscode.window.showWarningMessage(
                 `Telegram approval error: ${errorMessage}`,

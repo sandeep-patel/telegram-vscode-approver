@@ -74,6 +74,15 @@ The bot will:
 
 ## Integration Options
 
+### Which Should I Use?
+
+| Use Case | Recommended |
+|----------|-------------|
+| **Copilot Agent Mode** | MCP Server (Option A) |
+| **Manual approval UI** | VS Code Extension (Option B) |
+| **Custom tooling** | HTTP API (Option C) |
+| **All features** | MCP + Extension together |
+
 ### Option A: MCP Server (Recommended) 🌟
 
 Add the MCP server to your VS Code settings for Copilot to use:
@@ -102,13 +111,51 @@ Now Copilot can use the `run_approved_command` tool!
 
 ### Option B: VS Code Extension
 
-Build and install the VS Code extension:
+Build and install the VS Code extension for:
+- **Status bar monitoring** - See connection status and pending approvals
+- **Configuration UI** - Easy setup via command palette
+- **Manual approval** - Run specific commands with approval
+- **Bot management** - Start the bot directly from VS Code
+- **Auto-approve patterns** - Whitelist safe commands
 
 ```bash
 cd vscode-extension
 npm install
 npm run compile
-# Then install the .vsix file
+npx vsce package  # Creates .vsix file
+```
+
+Install via: `code --install-extension telegram-command-approval-*.vsix`
+
+**Extension Commands:**
+| Command | Description |
+|---------|-------------|
+| `Telegram Approval: Configure` | Open settings |
+| `Telegram Approval: Test Connection` | Verify bot status |
+| `Telegram Approval: Start Bot` | Start Python bot |
+| `Telegram Approval: Run Command with Approval` | Manual approval |
+| `Telegram Approval: Manage Auto-Approve Patterns` | Pattern UI |
+| `Telegram Approval: Show Logs` | Debug output |
+
+**Extension Settings:**
+```json
+{
+    "telegramApproval.enabled": true,
+    "telegramApproval.serverUrl": "http://localhost:8765",
+    "telegramApproval.timeoutSeconds": 300,
+    "telegramApproval.autoApprovePatterns": ["^(ls|pwd|cat)\\b"],
+    "telegramApproval.botPath": "/path/to/telegram-approval"
+}
+```
+
+**API for Other Extensions:**
+```typescript
+import { requestApproval } from 'telegram-command-approval';
+
+const approved = await requestApproval('npm install', {
+    explanation: 'Install dependencies',
+    goal: 'Project setup'
+});
 ```
 
 ### Option C: Direct HTTP Integration

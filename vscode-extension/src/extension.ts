@@ -1,13 +1,28 @@
 import * as vscode from 'vscode';
-import { ApprovalClient } from './approvalClient';
+import { ApprovalClient, setLogger } from './approvalClient';
 import { CommandInterceptor } from './commandInterceptor';
 
 let approvalClient: ApprovalClient;
 let commandInterceptor: CommandInterceptor;
 let statusBarItem: vscode.StatusBarItem;
+let outputChannel: vscode.OutputChannel;
+let healthCheckInterval: NodeJS.Timeout | undefined;
+
+function log(message: string, level: 'info' | 'warn' | 'error' = 'info') {
+    const timestamp = new Date().toISOString();
+    const prefix = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : 'ℹ️';
+    outputChannel.appendLine(`[${timestamp}] ${prefix} ${message}`);
+}
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Telegram Command Approval extension activated');
+    // Create output channel for logging
+    outputChannel = vscode.window.createOutputChannel('Telegram Approval');
+    context.subscriptions.push(outputChannel);
+    
+    log('Telegram Command Approval extension activated');
+
+    // Set logger for approval client
+    setLogger(log);
 
     // Initialize the approval client
     approvalClient = new ApprovalClient();
@@ -30,8 +45,15 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('telegramApproval.testConnection', testConnection),
         vscode.commands.registerCommand('telegramApproval.enable', enable),
         vscode.commands.registerCommand('telegramApproval.disable', disable),
+        vscode.commands.registerCommand('telegramApproval.showLogs', showLogs),
+        vscode.commands.registerCommand('telegramApproval.startBot', startBot),
+        vscode.commands.registerCommand('telegramApproval.runWithApproval', runWithApproval),
+        vscode.commands.registerCommand('telegramApproval.managePatterns', manageAutoApprovePatterns),
         statusBarItem
     );
+
+    // Start health check polling
+    startHealthCheckPolling();
 
     // Watch for configuration changes
     context.subscriptions.push(
@@ -75,7 +97,47 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    console.log('Telegram Command Approval ready');
+    log('Telegram Command Approval ready');
+}
+
+function startHealthCheckPolling() {
+    const config = vscode.workspace.getConfiguration('telegramApproval');
+    if (!config.get<boolean>('enabled')) {
+        return;
+    }
+    
+    // Poll every 30 seconds
+    healthCheckInterval = setInterval(async () => {
+        const result = await approvalClient.testConnection();
+        updateStatusBarHealth(result.success, result.pendingApprovals);
+    }, 30000);
+}
+
+function stopHealthCheckPolling() {
+    if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+        healthCheckInterval = undefined;
+    }
+}
+
+function updateStatusBarHealth(connected: boolean, pendingCount?: number) {
+    const config = vscode.workspace.getConfiguration('telegramApproval');
+    const enabled = config.get<boolean>('enabled');
+    
+    if (!enabled) {
+        statusBarItem.text = '$(bell-slash) TG Approval';
+        statusBarItem.tooltip = 'Telegram Command Approval: Disabled\nClick to configure';
+        statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    } else if (!connected) {
+        statusBarItem.text = '$(alert) TG Approval';
+        statusBarItem.tooltip = 'Telegram Command Approval: Disconnected\nClick to configure';
+        statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+    } else {
+        const pending = pendingCount ? ` (${pendingCount} pending)` : '';
+        statusBarItem.text = `$(bell) TG Approval${pending}`;
+        statusBarItem.tooltip = `Telegram Command Approval: Connected${pending}\nClick to configure`;
+        statusBarItem.backgroundColor = undefined;
+    }
 }
 
 function getCommandString(execution: vscode.ShellExecution): string | undefined {
@@ -174,16 +236,137 @@ async function configure() {
 }
 
 async function testConnection() {
+    log('Testing connection to approval server...');
     const result = await approvalClient.testConnection();
     
     if (result.success) {
+        log(`Connection successful. ${result.pendingApprovals} pending approval(s)`);
+        updateStatusBarHealth(true, result.pendingApprovals);
         vscode.window.showInformationMessage(
             `✅ Connected! ${result.pendingApprovals} pending approval(s)`
         );
     } else {
+        log(`Connection failed: ${result.error}`, 'error');
+        updateStatusBarHealth(false);
         vscode.window.showErrorMessage(
             `❌ Connection failed: ${result.error}`
         );
+    }
+}
+
+async function showLogs() {
+    outputChannel.show();
+}
+
+async function startBot() {
+    const config = vscode.workspace.getConfiguration('telegramApproval');
+    const botPath = config.get<string>('botPath');
+    
+    if (!botPath) {
+        const result = await vscode.window.showInputBox({
+            prompt: 'Enter the path to the telegram-approval bot directory',
+            placeHolder: '/path/to/telegram-approval'
+        });
+        
+        if (result) {
+            await config.update('botPath', result, true);
+        } else {
+            return;
+        }
+    }
+    
+    const finalPath = config.get<string>('botPath');
+    
+    const terminal = vscode.window.createTerminal({
+        name: 'Telegram Approval Bot',
+        cwd: finalPath,
+    });
+    
+    terminal.show();
+    terminal.sendText('source .venv/bin/activate && python bot.py');
+    
+    log(`Started bot from: ${finalPath}`);
+    vscode.window.showInformationMessage('Starting Telegram Approval Bot...');
+}
+
+async function runWithApproval() {
+    const command = await vscode.window.showInputBox({
+        prompt: 'Enter command to run with Telegram approval',
+        placeHolder: 'npm install'
+    });
+    
+    if (!command) {
+        return;
+    }
+    
+    log(`Running command with approval: ${command}`);
+    
+    const terminal = await commandInterceptor.executeWithApproval(command, {
+        explanation: 'User-initiated command via extension',
+        goal: 'Run approved command'
+    });
+    
+    if (!terminal) {
+        log('Command was rejected', 'warn');
+    }
+}
+
+async function manageAutoApprovePatterns() {
+    const config = vscode.workspace.getConfiguration('telegramApproval');
+    const patterns = config.get<string[]>('autoApprovePatterns') || [];
+    
+    const options = [
+        { label: '$(add) Add new pattern', action: 'add' },
+        { label: '$(list-unordered) View all patterns', action: 'view' },
+        { label: '$(trash) Remove a pattern', action: 'remove' },
+        ...patterns.map((p, i) => ({ label: `  ${p}`, action: 'none', pattern: p }))
+    ];
+    
+    const selected = await vscode.window.showQuickPick(options, {
+        placeHolder: 'Manage auto-approve patterns (regex)'
+    });
+    
+    if (!selected) return;
+    
+    switch (selected.action) {
+        case 'add':
+            const newPattern = await vscode.window.showInputBox({
+                prompt: 'Enter regex pattern for commands to auto-approve',
+                placeHolder: '^(ls|pwd|cat)\\b',
+                validateInput: (v) => {
+                    try {
+                        new RegExp(v);
+                        return undefined;
+                    } catch {
+                        return 'Invalid regex pattern';
+                    }
+                }
+            });
+            if (newPattern) {
+                await config.update('autoApprovePatterns', [...patterns, newPattern], true);
+                log(`Added auto-approve pattern: ${newPattern}`);
+                vscode.window.showInformationMessage(`Added pattern: ${newPattern}`);
+            }
+            break;
+        case 'view':
+            if (patterns.length === 0) {
+                vscode.window.showInformationMessage('No auto-approve patterns configured');
+            } else {
+                vscode.window.showInformationMessage(`Patterns: ${patterns.join(', ')}`);
+            }
+            break;
+        case 'remove':
+            const toRemove = await vscode.window.showQuickPick(
+                patterns.map(p => ({ label: p, pattern: p })),
+                { placeHolder: 'Select pattern to remove' }
+            );
+            if (toRemove) {
+                const updated = patterns.filter(p => p !== toRemove.pattern);
+                await config.update('autoApprovePatterns', updated, true);
+                log(`Removed auto-approve pattern: ${toRemove.pattern}`);
+                vscode.window.showInformationMessage(`Removed pattern: ${toRemove.pattern}`);
+            }
+            break;
     }
 }
 
@@ -200,7 +383,8 @@ async function disable() {
 }
 
 export function deactivate() {
-    console.log('Telegram Command Approval extension deactivated');
+    stopHealthCheckPolling();
+    log('Telegram Command Approval extension deactivated');
 }
 
 // Export for use by other extensions or Copilot integration
