@@ -20,6 +20,7 @@ const execAsync = promisify(exec);
 // Configuration
 const APPROVAL_SERVER_URL = process.env.GATEKEEPER_URL || 'http://localhost:8765';
 const DEFAULT_TIMEOUT = parseInt(process.env.GATEKEEPER_TIMEOUT || '300', 10);
+const DEFAULT_LOCAL_DELAY = parseInt(process.env.GATEKEEPER_LOCAL_DELAY || '10', 10);
 
 /**
  * Make an HTTP request (simple wrapper)
@@ -72,7 +73,8 @@ async function requestApproval(
     command: string,
     explanation: string = '',
     goal: string = '',
-    timeout: number = DEFAULT_TIMEOUT
+    timeout: number = DEFAULT_TIMEOUT,
+    localApprovalDelay: number = DEFAULT_LOCAL_DELAY
 ): Promise<boolean> {
     const requestId = `${Date.now()}-${process.pid}`;
 
@@ -84,6 +86,7 @@ async function requestApproval(
                 command,
                 explanation,
                 goal,
+                localApprovalDelay,
             }),
             timeout: timeout * 1000,
         });
@@ -123,7 +126,7 @@ async function runCommand(
 const server = new Server(
     {
         name: 'gatekeeper',
-        version: '0.5.0',
+        version: '0.7.0',
     },
     {
         capabilities: {
@@ -170,6 +173,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                         type: 'integer',
                         description: 'Timeout in seconds for command execution (default: 60)',
                         default: 60,
+                    },
+                    local_approval_delay: {
+                        type: 'integer',
+                        description: 'Seconds to wait for local VS Code approval before escalating to Telegram (default: 10)',
+                        default: 10,
                     },
                 },
                 required: ['command'],
@@ -235,6 +243,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const cwd = args?.cwd as string | undefined;
         const approvalTimeout = (args?.approval_timeout as number) || DEFAULT_TIMEOUT;
         const commandTimeout = (args?.command_timeout as number) || 60;
+        const localDelay = (args?.local_approval_delay as number) || DEFAULT_LOCAL_DELAY;
 
         if (!command) {
             return {
@@ -243,7 +252,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Request approval
-        const approved = await requestApproval(command, explanation, goal, approvalTimeout);
+        const approved = await requestApproval(command, explanation, goal, approvalTimeout, localDelay);
 
         if (!approved) {
             return {

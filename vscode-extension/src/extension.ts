@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import { ApprovalClient, setLogger } from './approvalClient';
+import { ApprovalClient, setLogger, PendingRequest } from './approvalClient';
 import { CommandInterceptor } from './commandInterceptor';
-import { SetupPanel, setOutputChannel, stopBotProcess, isBotRunning } from './setupPanel';
+import { SetupPanel, setOutputChannel, stopBotProcess, isBotRunning, ensureMcpRegistration } from './setupPanel';
 import { SidebarViewProvider } from './sidebarWebviewProvider';
 
 let approvalClient: ApprovalClient;
@@ -9,7 +9,9 @@ let commandInterceptor: CommandInterceptor;
 let statusBarItem: vscode.StatusBarItem;
 let outputChannel: vscode.OutputChannel;
 let healthCheckInterval: NodeJS.Timeout | undefined;
+let pendingPollInterval: NodeJS.Timeout | undefined;
 let sidebarProvider: SidebarViewProvider;
+let shownNotifications: Set<string> = new Set();
 
 function log(message: string, level: 'info' | 'warn' | 'error' = 'info') {
     const timestamp = new Date().toISOString();
@@ -67,6 +69,9 @@ export function activate(context: vscode.ExtensionContext) {
     // Start health check polling
     startHealthCheckPolling();
 
+    // Auto-update MCP server path if extension version changed
+    ensureMcpRegistration(context);
+
     // Watch for configuration changes
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
@@ -112,13 +117,17 @@ export function activate(context: vscode.ExtensionContext) {
     log('GateKeeper ready');
 }
 
-function startHealthCheckPolling() {
+async function startHealthCheckPolling() {
     const config = vscode.workspace.getConfiguration('gatekeeper');
     if (!config.get<boolean>('enabled')) {
         return;
     }
     
-    // Poll every 30 seconds
+    // Do an immediate health check to start pending poll if server is running
+    const result = await approvalClient.testConnection();
+    updateStatusBarHealth(result.success, result.pendingApprovals);
+    
+    // Then poll every 30 seconds
     healthCheckInterval = setInterval(async () => {
         const result = await approvalClient.testConnection();
         updateStatusBarHealth(result.success, result.pendingApprovals);
@@ -132,6 +141,104 @@ function stopHealthCheckPolling() {
     }
 }
 
+function startPendingPoll() {
+    if (pendingPollInterval) {
+        return; // Already polling
+    }
+    
+    log('Starting pending request polling');
+    
+    // Poll every 2 seconds for fast response
+    pendingPollInterval = setInterval(async () => {
+        try {
+            const pending = await approvalClient.getPending();
+            
+            // Clean up notifications for resolved requests
+            const pendingIds = new Set(pending.map(p => p.requestId));
+            for (const id of shownNotifications) {
+                if (!pendingIds.has(id)) {
+                    shownNotifications.delete(id);
+                }
+            }
+            
+            // Show notifications for new pending requests
+            for (const req of pending) {
+                if (!shownNotifications.has(req.requestId)) {
+                    showApprovalNotification(req);
+                    shownNotifications.add(req.requestId);
+                }
+            }
+        } catch {
+            // Server might be down, stop polling
+            stopPendingPoll();
+        }
+    }, 2000);
+}
+
+function stopPendingPoll() {
+    if (pendingPollInterval) {
+        log('Stopping pending request polling');
+        clearInterval(pendingPollInterval);
+        pendingPollInterval = undefined;
+    }
+}
+
+async function showApprovalNotification(req: PendingRequest) {
+    const cmdPreview = req.command.length > 60 
+        ? req.command.substring(0, 60) + '...' 
+        : req.command;
+    
+    const message = req.goal 
+        ? `🔐 ${req.goal}\n\n${cmdPreview}`
+        : `🔐 Command approval:\n\n${cmdPreview}`;
+    
+    log(`Showing notification for request: ${req.requestId}`);
+    
+    const action = await vscode.window.showInformationMessage(
+        message,
+        { modal: false },
+        '✅ Approve',
+        '❌ Reject',
+        '👁 Details'
+    );
+    
+    // Request might already be resolved by Telegram
+    if (!shownNotifications.has(req.requestId)) {
+        return;
+    }
+    
+    if (action === '✅ Approve') {
+        const success = await approvalClient.localApprove(req.requestId);
+        if (success) {
+            log(`Request ${req.requestId} approved via VS Code`);
+            vscode.window.showInformationMessage('✅ Command approved');
+        } else {
+            vscode.window.showWarningMessage('⚠️ Already resolved (possibly via Telegram)');
+        }
+        shownNotifications.delete(req.requestId);
+    } else if (action === '❌ Reject') {
+        const success = await approvalClient.localReject(req.requestId);
+        if (success) {
+            log(`Request ${req.requestId} rejected via VS Code`);
+            vscode.window.showInformationMessage('❌ Command rejected');
+        } else {
+            vscode.window.showWarningMessage('⚠️ Already resolved (possibly via Telegram)');
+        }
+        shownNotifications.delete(req.requestId);
+    } else if (action === '👁 Details') {
+        // Show full command in output channel
+        outputChannel.appendLine('\n--- Approval Request Details ---');
+        outputChannel.appendLine(`Request ID: ${req.requestId}`);
+        outputChannel.appendLine(`Goal: ${req.goal || 'N/A'}`);
+        outputChannel.appendLine(`Explanation: ${req.explanation || 'N/A'}`);
+        outputChannel.appendLine(`Command:\n${req.command}`);
+        outputChannel.appendLine('---\n');
+        outputChannel.show();
+        // Re-show the notification
+        shownNotifications.delete(req.requestId);
+    }
+}
+
 function updateStatusBarHealth(connected: boolean, pendingCount?: number) {
     const config = vscode.workspace.getConfiguration('gatekeeper');
     const enabled = config.get<boolean>('enabled');
@@ -140,6 +247,13 @@ function updateStatusBarHealth(connected: boolean, pendingCount?: number) {
     
     // Update sidebar
     sidebarProvider.updateStatus(connected, pendingCount || 0, running || connected, hasToken || connected);
+    
+    // Start/stop pending request polling based on connection
+    if (connected && enabled) {
+        startPendingPoll();
+    } else {
+        stopPendingPoll();
+    }
     
     if (!enabled) {
         statusBarItem.text = '$(shield) GateKeeper';
@@ -401,8 +515,9 @@ async function disable() {
 
 export function deactivate() {
     stopHealthCheckPolling();
+    stopPendingPoll();
     stopBotProcess();
-    log('Telegram Command Approval extension deactivated');
+    log('GateKeeper extension deactivated');
 }
 
 // Export for use by other extensions or Copilot integration

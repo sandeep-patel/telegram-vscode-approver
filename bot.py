@@ -47,10 +47,11 @@ class PendingApproval:
 class ApprovalBot:
     """Telegram bot that handles command approval requests."""
 
-    def __init__(self, token: str, chat_id: int, http_port: int = 8765):
+    def __init__(self, token: str, chat_id: int, http_port: int = 8765, local_approval_delay: int = 10):
         self.token = token
         self.chat_id = chat_id
         self.http_port = http_port
+        self.local_approval_delay = local_approval_delay  # Seconds to wait for local approval before sending to Telegram
         self.pending_approvals: Dict[str, PendingApproval] = {}
         self.app: Optional[Application] = None
         self.web_app: Optional[web.Application] = None
@@ -148,16 +149,8 @@ class ApprovalBot:
             if not approval.response_future.done():
                 approval.response_future.set_result(approved)
 
-    async def send_approval_request(
-        self,
-        request_id: str,
-        command: str,
-        explanation: str = "",
-        goal: str = "",
-    ) -> bool:
-        """Send an approval request to Telegram and wait for response."""
-        
-        # Create keyboard with approve/reject buttons
+    async def send_to_telegram(self, request_id: str, command: str, explanation: str, goal: str) -> bool:
+        """Send approval request to Telegram. Returns False if sending fails."""
         keyboard = [
             [
                 InlineKeyboardButton("✅ Approve", callback_data=f"approve:{request_id}"),
@@ -166,18 +159,40 @@ class ApprovalBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Format the message
         message = "🔐 *Command Approval Request*\n\n"
-        
         if goal:
             message += f"📎 *Goal:* {goal}\n\n"
-        
         if explanation:
             message += f"📝 *Explanation:* {explanation}\n\n"
-        
         message += f"```bash\n{command}\n```"
 
-        # Create pending approval
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+            logger.info(f"Sent request {request_id} to Telegram (no local approval)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+            return False
+
+    async def request_approval(
+        self,
+        request_id: str,
+        command: str,
+        explanation: str = "",
+        goal: str = "",
+        local_delay: int | None = None,
+    ) -> bool:
+        """Request approval with local-first flow: VS Code first, Telegram fallback."""
+        
+        # Use provided delay or fall back to server default
+        delay = local_delay if local_delay is not None else self.local_approval_delay
+        
+        # Create pending approval (VS Code will see this via /api/pending)
         approval = PendingApproval(
             request_id=request_id,
             command=command,
@@ -186,23 +201,32 @@ class ApprovalBot:
             timestamp=datetime.now(),
         )
         self.pending_approvals[request_id] = approval
+        logger.info(f"Created pending approval {request_id}, waiting {delay}s for local approval...")
 
-        # Send message
+        # Wait for local approval first
         try:
-            await self.app.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode="Markdown",
-                reply_markup=reply_markup,
+            result = await asyncio.wait_for(
+                asyncio.shield(approval.response_future),
+                timeout=delay
             )
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            logger.info(f"Request {request_id} resolved locally: {'approved' if result else 'rejected'}")
+            return result
+        except asyncio.TimeoutError:
+            pass  # No local approval, continue to Telegram
+
+        # Still pending - send to Telegram
+        if request_id not in self.pending_approvals:
+            # Was resolved while we were processing
+            return approval.response_future.result() if approval.response_future.done() else False
+
+        sent = await self.send_to_telegram(request_id, command, explanation, goal)
+        if not sent:
             self.pending_approvals.pop(request_id, None)
             return False
 
-        # Wait for response with timeout
+        # Wait for either local or Telegram response
         try:
-            result = await asyncio.wait_for(approval.response_future, timeout=300)  # 5 min timeout
+            result = await asyncio.wait_for(approval.response_future, timeout=300)  # 5 min total timeout
             return result
         except asyncio.TimeoutError:
             logger.warning(f"Approval request {request_id} timed out")
@@ -218,17 +242,19 @@ class ApprovalBot:
             command = data.get("command", "")
             explanation = data.get("explanation", "")
             goal = data.get("goal", "")
+            local_delay = data.get("localApprovalDelay")  # Optional override from extension
 
             if not command:
                 return web.json_response({"error": "command is required"}, status=400)
 
             logger.info(f"Received approval request: {command[:50]}...")
             
-            approved = await self.send_approval_request(
+            approved = await self.request_approval(
                 request_id=request_id,
                 command=command,
                 explanation=explanation,
                 goal=goal,
+                local_delay=local_delay,
             )
 
             return web.json_response({
@@ -249,11 +275,48 @@ class ApprovalBot:
             "pending_approvals": len(self.pending_approvals),
         })
 
+    async def get_pending(self, request: web.Request) -> web.Response:
+        """Get list of pending approval requests."""
+        pending = [
+            {
+                "requestId": req_id,
+                "command": approval.command,
+                "explanation": approval.explanation,
+                "goal": approval.goal,
+                "timestamp": approval.timestamp.isoformat(),
+            }
+            for req_id, approval in self.pending_approvals.items()
+        ]
+        return web.json_response({"pending": pending})
+
+    async def local_approve(self, request: web.Request) -> web.Response:
+        """Approve a pending request locally (from VS Code)."""
+        request_id = request.match_info.get("request_id")
+        if request_id not in self.pending_approvals:
+            return web.json_response({"error": "Request not found or already resolved"}, status=404)
+        
+        await self._resolve_approval(request_id, True)
+        logger.info(f"Request {request_id} approved locally via VS Code")
+        return web.json_response({"approved": True, "requestId": request_id})
+
+    async def local_reject(self, request: web.Request) -> web.Response:
+        """Reject a pending request locally (from VS Code)."""
+        request_id = request.match_info.get("request_id")
+        if request_id not in self.pending_approvals:
+            return web.json_response({"error": "Request not found or already resolved"}, status=404)
+        
+        await self._resolve_approval(request_id, False)
+        logger.info(f"Request {request_id} rejected locally via VS Code")
+        return web.json_response({"approved": False, "requestId": request_id})
+
     async def start_http_server(self) -> None:
         """Start the HTTP server for receiving approval requests."""
         self.web_app = web.Application()
         self.web_app.router.add_post("/approve", self.handle_http_request)
         self.web_app.router.add_get("/health", self.health_check)
+        self.web_app.router.add_get("/api/pending", self.get_pending)
+        self.web_app.router.add_post("/api/approve/{request_id}", self.local_approve)
+        self.web_app.router.add_post("/api/reject/{request_id}", self.local_reject)
 
         self.web_runner = web.AppRunner(self.web_app)
         await self.web_runner.setup()
@@ -309,6 +372,8 @@ def main():
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     http_port = int(os.environ.get("APPROVAL_HTTP_PORT", "8765"))
 
+    local_approval_delay = int(os.environ.get("LOCAL_APPROVAL_DELAY", "10"))
+
     if not token or not chat_id:
         config_path = os.path.join(os.path.dirname(__file__), "config.json")
         if os.path.exists(config_path):
@@ -317,6 +382,7 @@ def main():
                 token = token or config.get("telegram_bot_token")
                 chat_id = chat_id or config.get("telegram_chat_id")
                 http_port = config.get("http_port", http_port)
+                local_approval_delay = config.get("local_approval_delay", local_approval_delay)
 
     if not token:
         print("Error: TELEGRAM_BOT_TOKEN not set")
@@ -330,7 +396,7 @@ def main():
         # Still start the bot so user can get their chat ID
         chat_id = 0
 
-    bot = ApprovalBot(token=token, chat_id=int(chat_id), http_port=http_port)
+    bot = ApprovalBot(token=token, chat_id=int(chat_id), http_port=http_port, local_approval_delay=local_approval_delay)
     
     try:
         asyncio.run(bot.run())

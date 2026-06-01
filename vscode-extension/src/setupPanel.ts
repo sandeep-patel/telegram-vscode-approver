@@ -58,7 +58,7 @@ export class SetupPanel {
             async (message) => {
                 switch (message.command) {
                     case 'saveAndStart':
-                        await this._saveAndStart(message.token, message.chatId, message.port, message.useExistingToken);
+                        await this._saveAndStart(message.token, message.chatId, message.port, message.localApprovalDelay, message.useExistingToken);
                         break;
                     case 'stop':
                         await this._stopBot();
@@ -87,6 +87,7 @@ export class SetupPanel {
         const token = await this._context.secrets.get('gatekeeper.botToken') || '';
         const chatId = config.get<string>('chatId') || '';
         const port = config.get<number>('httpPort') || 8765;
+        const localApprovalDelay = config.get<number>('localApprovalDelay') || 10;
         
         // Check if we started the bot process
         const processRunning = botProcess !== undefined && !botProcess.killed;
@@ -103,6 +104,7 @@ export class SetupPanel {
             hasToken: !!token,
             chatId,
             port,
+            localApprovalDelay,
             isRunning,
             processRunning, // We started it
             serverResponding, // Something is responding
@@ -124,7 +126,7 @@ export class SetupPanel {
         });
     }
 
-    private async _saveAndStart(token: string, chatId: string, port: number, useExistingToken: boolean = false) {
+    private async _saveAndStart(token: string, chatId: string, port: number, localApprovalDelay: number, useExistingToken: boolean = false) {
         try {
             // Get existing token if using existing
             let finalToken = token;
@@ -159,10 +161,11 @@ export class SetupPanel {
             const config = vscode.workspace.getConfiguration('gatekeeper');
             await config.update('chatId', chatId, vscode.ConfigurationTarget.Global);
             await config.update('httpPort', port, vscode.ConfigurationTarget.Global);
+            await config.update('localApprovalDelay', localApprovalDelay, vscode.ConfigurationTarget.Global);
             await config.update('serverUrl', `http://localhost:${port}`, vscode.ConfigurationTarget.Global);
             await config.update('enabled', true, vscode.ConfigurationTarget.Global);
 
-            log(`Saved configuration - ChatID: ${chatId}, Port: ${port}`);
+            log(`Saved configuration - ChatID: ${chatId}, Port: ${port}, Local Delay: ${localApprovalDelay}s`);
 
             // Start the bot
             await this._startBot(finalToken, chatId, port);
@@ -733,6 +736,11 @@ export class SetupPanel {
                 <input type="number" id="port" value="8765">
                 <p class="help-text">Port for the local approval server</p>
             </div>
+            <div class="form-group">
+                <label for="localDelay">Local Approval Delay (seconds)</label>
+                <input type="number" id="localDelay" value="10" min="0" max="300">
+                <p class="help-text">Wait this long for VS Code approval before sending to Telegram</p>
+            </div>
         </div>
 
         <div class="button-row">
@@ -766,6 +774,7 @@ export class SetupPanel {
             const token = tokenInput.value.trim();
             const chatId = document.getElementById('chatId').value.trim();
             const port = parseInt(document.getElementById('port').value) || 8765;
+            const localApprovalDelay = parseInt(document.getElementById('localDelay').value) || 10;
             
             // Check if token is configured (input is hidden) or newly entered
             const useExistingToken = tokenConfigured.style.display !== 'none';
@@ -785,7 +794,7 @@ export class SetupPanel {
             document.getElementById('start-btn').textContent = '⏳ Starting...';
 
             // Send empty token to indicate "use existing"
-            vscode.postMessage({ command: 'saveAndStart', token: token || '', chatId, port, useExistingToken });
+            vscode.postMessage({ command: 'saveAndStart', token: token || '', chatId, port, localApprovalDelay, useExistingToken });
         }
 
         function stopBot() {
@@ -901,6 +910,7 @@ export class SetupPanel {
                 case 'status':
                     if (message.chatId) document.getElementById('chatId').value = message.chatId;
                     if (message.port) document.getElementById('port').value = message.port;
+                    if (message.localApprovalDelay !== undefined) document.getElementById('localDelay').value = message.localApprovalDelay;
                     // Show token status
                     if (message.hasToken && message.token) {
                         document.getElementById('token-configured').style.display = 'block';
@@ -980,4 +990,86 @@ export function stopBotProcess() {
 
 export function isBotRunning(): boolean {
     return botProcess !== undefined && !botProcess.killed;
+}
+
+/**
+ * Auto-register the MCP server with the correct extension path.
+ * Called on extension activation to ensure mcp.json always points to the current version.
+ */
+export async function ensureMcpRegistration(context: vscode.ExtensionContext) {
+    try {
+        const fs = await import('fs');
+        const os = await import('os');
+        const path = await import('path');
+        
+        const extensionPath = context.extensionPath;
+        const mcpServerPath = path.join(extensionPath, 'out', 'mcpServer.js');
+        
+        // Check if MCP server exists
+        if (!fs.existsSync(mcpServerPath)) {
+            return; // Not bundled, skip
+        }
+        
+        // Path to VS Code's mcp.json (cross-platform)
+        let mcpConfigPath: string;
+        const platform = os.platform();
+        if (platform === 'darwin') {
+            mcpConfigPath = path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User', 'mcp.json');
+        } else if (platform === 'win32') {
+            mcpConfigPath = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'mcp.json');
+        } else {
+            mcpConfigPath = path.join(os.homedir(), '.config', 'Code', 'User', 'mcp.json');
+        }
+        
+        // Read existing config
+        let mcpConfig: { servers: Record<string, any>; inputs?: any[] } = { servers: {}, inputs: [] };
+        if (fs.existsSync(mcpConfigPath)) {
+            try {
+                const content = fs.readFileSync(mcpConfigPath, 'utf8');
+                mcpConfig = JSON.parse(content);
+            } catch {
+                return; // Can't parse, don't overwrite
+            }
+        }
+        
+        // Check if already configured with correct path
+        const existingServer = mcpConfig.servers?.['gatekeeper'];
+        if (existingServer?.args?.[0] === mcpServerPath) {
+            return; // Already correct
+        }
+        
+        // Only update if gatekeeper entry exists (don't auto-create on first install)
+        if (!existingServer) {
+            return;
+        }
+        
+        // Update path
+        const config = vscode.workspace.getConfiguration('gatekeeper');
+        const port = config.get<number>('httpPort') || 8765;
+        
+        mcpConfig.servers['gatekeeper'] = {
+            type: 'stdio',
+            command: 'node',
+            args: [mcpServerPath],
+            env: {
+                GATEKEEPER_URL: `http://localhost:${port}`
+            }
+        };
+        
+        fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, '\t'));
+        log(`Updated MCP server path to ${mcpServerPath}`);
+        
+        // Notify user to reload
+        vscode.window.showInformationMessage(
+            '🔧 GateKeeper MCP server path updated. Reload window to apply.',
+            'Reload Window'
+        ).then(selection => {
+            if (selection === 'Reload Window') {
+                vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+        });
+        
+    } catch (error) {
+        // Silent fail - this is convenience functionality
+    }
 }

@@ -19,6 +19,8 @@ Approve VS Code Copilot terminal commands from your phone! 📱✅
 ## Features
 
 - **One-Click Setup**: Enter bot token and chat ID, click Start — that's it!
+- **Local-First Approval**: VS Code notification first, Telegram fallback
+- **Race Condition Friendly**: Approve from VS Code OR Telegram — first wins
 - **Mobile Approval**: Approve or reject commands from anywhere
 - **Real-time Notifications**: Get instant alerts when Copilot wants to run a command
 - **Quick Actions**: Approve all or reject all pending commands
@@ -52,16 +54,24 @@ Approve VS Code Copilot terminal commands from your phone! 📱✅
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  VS Code        │────▶│  GateKeeper      │────▶│  Your Phone │
-│  Copilot        │     │  Server          │     │  (Telegram) │
-│                 │◀────│                  │◀────│             │
-└─────────────────┘     └──────────────────┘     └─────────────┘
+│  VS Code        │────▶│  GateKeeper      │────▶│  VS Code    │
+│  Copilot        │     │  Server          │     │  Notification
+│                 │     │                  │     │  (Local)    │
+│                 │     │                  │     └──────┬──────┘
+│                 │     │                  │            │
+│                 │     │                  │     ┌──────▼──────┐
+│                 │◀────│                  │◀────│  Telegram   │
+└─────────────────┘     └──────────────────┘     │  (Fallback) │
+                                                 └─────────────┘
 ```
 
+### Local-First Approval Flow
+
 1. Copilot wants to run a command
-2. Command is sent to your phone
-3. You tap ✅ Approve or ❌ Reject
-4. VS Code continues or cancels
+2. **VS Code notification appears immediately** with ✅ Approve / ❌ Reject
+3. If no response within `localApprovalDelay` seconds (default: 10s)...
+4. Command **escalates to Telegram**
+5. Either channel can approve — **first response wins**
 
 ## Extension Commands
 
@@ -89,13 +99,8 @@ Approve VS Code Copilot terminal commands from your phone! 📱✅
 |---------|-------------|---------|
 | `gatekeeper.enabled` | Enable approval routing | `false` |
 | `gatekeeper.serverUrl` | Server HTTP URL | `http://localhost:8765` |
-| `gatekeeper.timeoutSeconds` | Approval timeout | `300` |
-| `gatekeeper.autoApprovePatterns` | Regex patterns to auto-approve | `[]` |
-| `gatekeeper.httpPort` | HTTP server port | `8765` |
-
-## Auto-Approve Patterns
-
-Add regex patterns for commands that should auto-approve:
+| `gatekeeper.timeoutSeconds` | Total approval timeout | `300` |
+| `gatekeeper.localApprovalDelay` | Seconds to wait for VS Code approval before Telegram | `10` |
 
 ```json
 {

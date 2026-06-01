@@ -12,6 +12,14 @@ interface HealthResponse {
     pending_approvals: number;
 }
 
+export interface PendingRequest {
+    requestId: string;
+    command: string;
+    explanation: string;
+    goal: string;
+    timestamp: string;
+}
+
 // Logger function that will be set by extension.ts
 let logger: ((message: string, level?: 'info' | 'warn' | 'error') => void) | undefined;
 
@@ -214,5 +222,31 @@ export class ApprovalClient {
         } finally {
             statusMessage.dispose();
         }
+    }
+
+    async getPending(): Promise<PendingRequest[]> {
+        const result = await this.fetch('/api/pending', { timeout: 5 });
+        if (result.ok && result.data) {
+            return result.data.pending || [];
+        }
+        return [];
+    }
+
+    async localApprove(requestId: string): Promise<boolean> {
+        log(`Approving request locally: ${requestId}`);
+        const result = await this.fetch(`/api/approve/${requestId}`, {
+            method: 'POST',
+            timeout: 5,
+        });
+        return result.ok;
+    }
+
+    async localReject(requestId: string): Promise<boolean> {
+        log(`Rejecting request locally: ${requestId}`);
+        const result = await this.fetch(`/api/reject/${requestId}`, {
+            method: 'POST',
+            timeout: 5,
+        });
+        return result.ok;
     }
 }

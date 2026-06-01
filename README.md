@@ -20,16 +20,24 @@ Approve VS Code Copilot terminal commands from your phone! 📱✅
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  VS Code        │────▶│  GateKeeper      │────▶│  Your Phone │
-│  Copilot        │     │  Server          │     │  (Telegram) │
-│                 │◀────│                  │◀────│             │
-└─────────────────┘     └──────────────────┘     └─────────────┘
+│  VS Code        │────▶│  GateKeeper      │────▶│  VS Code    │
+│  Copilot        │     │  Server          │     │  Notification
+│                 │     │                  │     │  (Local)    │
+│                 │     │                  │     └──────┬──────┘
+│                 │     │                  │            │
+│                 │     │                  │     ┌──────▼──────┐
+│                 │◀────│                  │◀────│  Telegram   │
+└─────────────────┘     └──────────────────┘     │  (Fallback) │
+                                                 └─────────────┘
 ```
 
+### Local-First Approval Flow
+
 1. Copilot wants to run a command
-2. Command is sent to your phone
-3. You tap ✅ Approve or ❌ Reject
-4. VS Code continues or cancels
+2. **VS Code notification appears immediately** with ✅ Approve / ❌ Reject
+3. If no response within `localApprovalDelay` seconds (default: 10s)...
+4. Command **escalates to Telegram**
+5. Either channel can approve — **first response wins**
 
 ## Quick Start (Recommended) 🌟
 
@@ -133,10 +141,11 @@ Response: `{"approved": true, "requestId": "..."}`
 ### Environment Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+|----------|-------------|---------|  
 | `TELEGRAM_BOT_TOKEN` | Your bot token from BotFather | Required |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID | Required |
 | `APPROVAL_HTTP_PORT` | HTTP server port | `8765` |
+| `LOCAL_APPROVAL_DELAY` | Seconds to wait for VS Code approval before Telegram | `10` |
 
 ### config.json (Alternative)
 
@@ -144,7 +153,8 @@ Response: `{"approved": true, "requestId": "..."}`
 {
     "telegram_bot_token": "YOUR_TOKEN",
     "telegram_chat_id": 123456789,
-    "http_port": 8765
+    "http_port": 8765,
+    "local_approval_delay": 10
 }
 ```
 
