@@ -167,6 +167,7 @@ Response: `{"approved": true, "requestId": "..."}`
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID | Required |
 | `APPROVAL_HTTP_PORT` | HTTP server port | `8765` |
 | `LOCAL_APPROVAL_DELAY` | Seconds to wait for VS Code approval before Telegram | `10` |
+| `PREVENT_SLEEP` | Prevent macOS from sleeping (`true`/`false`) | `true` |
 
 ### config.json (Alternative)
 
@@ -175,7 +176,8 @@ Response: `{"approved": true, "requestId": "..."}`
     "telegram_bot_token": "YOUR_TOKEN",
     "telegram_chat_id": 123456789,
     "http_port": 8765,
-    "local_approval_delay": 10
+    "local_approval_delay": 10,
+    "prevent_sleep": true
 }
 ```
 
@@ -224,6 +226,26 @@ docker-compose up -d
 - Bot only accepts commands from your Chat ID  
 - Bot token stored securely in VS Code secret storage (extension)
 - Commands auto-reject after 5 minutes
+
+## Platform Features
+
+### macOS Sleep Prevention
+
+When running on macOS, the server can prevent your Mac from sleeping using `caffeinate`. This ensures approval requests aren't missed while the server is active.
+
+- ☕ **Enabled by default** — toggle in Advanced Settings or set `PREVENT_SLEEP=false`
+- ☕ **Auto-disabled** when server stops (Ctrl+C or graceful shutdown)
+- Uses `-i` (prevent idle sleep) and `-s` (prevent system sleep on AC power)
+
+You'll see in the logs:
+```
+☕ Sleep prevention enabled (caffeinate)
+```
+
+To disable, either:
+- Uncheck "☕ Prevent Mac from sleeping" in Advanced Settings
+- Set `PREVENT_SLEEP=false` environment variable
+- Set `"prevent_sleep": false` in config.json
 
 ## Architecture
 

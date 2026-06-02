@@ -12,6 +12,8 @@ import asyncio
 import json
 import os
 import logging
+import platform
+import subprocess
 from datetime import datetime
 from typing import Dict, Optional
 from dataclasses import dataclass, field
@@ -60,17 +62,52 @@ class PendingQuestion:
 class ApprovalBot:
     """Telegram bot that handles command approval requests."""
 
-    def __init__(self, token: str, chat_id: int, http_port: int = 8765, local_approval_delay: int = 10):
+    def __init__(self, token: str, chat_id: int, http_port: int = 8765, local_approval_delay: int = 10, prevent_sleep: bool = True):
         self.token = token
         self.chat_id = chat_id
         self.http_port = http_port
         self.local_approval_delay = local_approval_delay  # Seconds to wait for local approval before sending to Telegram
+        self.prevent_sleep = prevent_sleep  # Whether to prevent macOS from sleeping
         self.pending_approvals: Dict[str, PendingApproval] = {}
         self.pending_questions: Dict[str, PendingQuestion] = {}
         self.awaiting_text_response: Optional[str] = None  # request_id of question awaiting text input
         self.app: Optional[Application] = None
         self.web_app: Optional[web.Application] = None
         self.web_runner: Optional[web.AppRunner] = None
+        self.caffeinate_proc: Optional[subprocess.Popen] = None  # macOS sleep prevention
+
+    def _start_caffeinate(self) -> None:
+        """Start caffeinate to prevent macOS from sleeping while server runs."""
+        if not self.prevent_sleep:
+            logger.info("☕ Sleep prevention disabled by configuration")
+            return
+        
+        if platform.system() != "Darwin":
+            return  # Only works on macOS
+        
+        try:
+            # -i: prevent idle sleep, -s: prevent system sleep when on AC power
+            self.caffeinate_proc = subprocess.Popen(
+                ["caffeinate", "-i", "-s"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("☕ Sleep prevention enabled (caffeinate)")
+        except FileNotFoundError:
+            logger.warning("caffeinate not found - sleep prevention disabled")
+        except Exception as e:
+            logger.warning(f"Failed to start caffeinate: {e}")
+
+    def _stop_caffeinate(self) -> None:
+        """Stop caffeinate when server shuts down."""
+        if self.caffeinate_proc:
+            self.caffeinate_proc.terminate()
+            try:
+                self.caffeinate_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.caffeinate_proc.kill()
+            self.caffeinate_proc = None
+            logger.info("☕ Sleep prevention disabled")
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
@@ -555,6 +592,9 @@ class ApprovalBot:
 
     async def run(self) -> None:
         """Run the bot."""
+        # Prevent macOS from sleeping while server runs
+        self._start_caffeinate()
+        
         # Build the Telegram application
         self.app = Application.builder().token(self.token).build()
 
@@ -583,6 +623,7 @@ class ApprovalBot:
         except asyncio.CancelledError:
             pass
         finally:
+            self._stop_caffeinate()
             await self.stop_http_server()
             await self.app.updater.stop()
             await self.app.stop()
@@ -595,8 +636,16 @@ def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     http_port = int(os.environ.get("APPROVAL_HTTP_PORT", "8765"))
-
     local_approval_delay = int(os.environ.get("LOCAL_APPROVAL_DELAY", "10"))
+    
+    # PREVENT_SLEEP: "true"/"1" = enabled, "false"/"0" = disabled, default = True
+    prevent_sleep_env = os.environ.get("PREVENT_SLEEP", "").lower()
+    if prevent_sleep_env in ("false", "0"):
+        prevent_sleep = False
+    elif prevent_sleep_env in ("true", "1"):
+        prevent_sleep = True
+    else:
+        prevent_sleep = True  # Default to enabled
 
     if not token or not chat_id:
         config_path = os.path.join(os.path.dirname(__file__), "config.json")
@@ -607,6 +656,9 @@ def main():
                 chat_id = chat_id or config.get("telegram_chat_id")
                 http_port = config.get("http_port", http_port)
                 local_approval_delay = config.get("local_approval_delay", local_approval_delay)
+                # Only override prevent_sleep from config if not set via env
+                if prevent_sleep_env == "":
+                    prevent_sleep = config.get("prevent_sleep", prevent_sleep)
 
     if not token:
         print("Error: TELEGRAM_BOT_TOKEN not set")
@@ -620,7 +672,13 @@ def main():
         # Still start the bot so user can get their chat ID
         chat_id = 0
 
-    bot = ApprovalBot(token=token, chat_id=int(chat_id), http_port=http_port, local_approval_delay=local_approval_delay)
+    bot = ApprovalBot(
+        token=token,
+        chat_id=int(chat_id),
+        http_port=http_port,
+        local_approval_delay=local_approval_delay,
+        prevent_sleep=prevent_sleep,
+    )
     
     try:
         asyncio.run(bot.run())

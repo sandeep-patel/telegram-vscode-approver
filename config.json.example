@@ -2,5 +2,6 @@
     "telegram_bot_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
     "telegram_chat_id": 0,
     "http_port": 8765,
-    "local_approval_delay": 10
+    "local_approval_delay": 10,
+    "prevent_sleep": true
 }

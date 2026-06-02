@@ -137,6 +137,11 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Whether to use MCP server integration (recommended)"
+                },
+                "gatekeeper.preventSleep": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Prevent macOS from sleeping while the server is running (uses caffeinate)"
                 }
             }
         }
