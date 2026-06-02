@@ -156,6 +156,13 @@ export class SetupPanel {
                 return;
             }
 
+            // Validate port range (1024-65535; privileged ports require root)
+            const portNum = Number(port);
+            if (!Number.isInteger(portNum) || portNum < 1024 || portNum > 65535) {
+                this._showError(`Invalid port ${port}. Use a number between 1024 and 65535 (ports below 1024 require root).`);
+                return;
+            }
+
             // Save token securely (only if new token provided)
             if (token && token.includes(':')) {
                 await this._context.secrets.store('gatekeeper.botToken', token);
@@ -212,16 +219,22 @@ export class SetupPanel {
         log(`Starting bot with Python: ${pythonPath}`);
         log(`Bot script: ${botScriptPath}`);
 
-        // Ensure Python dependencies are installed (auto-install on first run)
-        const depsOk = await this._ensureBotDeps(pythonPath, botScriptPath);
-        if (!depsOk) {
+        // Ensure Python dependencies are installed (auto-install on first run).
+        // Returns the python interpreter to actually use (may be a managed venv).
+        const runtimePython = await this._ensureBotDeps(pythonPath, botScriptPath);
+        if (!runtimePython) {
             botStarting = false;
             this._sendStatus();
             return;
         }
 
+        // Buffer the last bit of stderr so we can surface a useful error if the bot dies
+        // before the health endpoint comes up.
+        const stderrBuffer: string[] = [];
+        const STDERR_BUFFER_MAX = 50; // keep last 50 lines
+
         // Start the bot process
-        botProcess = spawn(pythonPath, [botScriptPath], {
+        botProcess = spawn(runtimePython, [botScriptPath], {
             env: {
                 ...process.env,
                 TELEGRAM_BOT_TOKEN: token,
@@ -240,6 +253,10 @@ export class SetupPanel {
         botProcess.stderr?.on('data', (data) => {
             const output = data.toString().trim();
             log(`[Bot Error] ${output}`);
+            stderrBuffer.push(output);
+            if (stderrBuffer.length > STDERR_BUFFER_MAX) {
+                stderrBuffer.splice(0, stderrBuffer.length - STDERR_BUFFER_MAX);
+            }
         });
 
         botProcess.on('error', (error) => {
@@ -283,14 +300,65 @@ export class SetupPanel {
             vscode.commands.executeCommand('gatekeeper.refreshStatus');
             
             // Auto-register MCP server
-            await this._registerMcpServer(pythonPath, botScriptPath, port);
+            await this._registerMcpServer(runtimePython, botScriptPath, port);
         } else if (botProcess && !botProcess.killed) {
             // Process is running but server not responding
             log('Bot process running but server not responding to health checks');
-            this._panel.webview.postMessage({ command: 'error', message: 'Server started but not responding. Check logs.' });
+            this._panel.webview.postMessage({ command: 'error', message: 'Server started but not responding to /health. Check GateKeeper logs.' });
+        } else {
+            // Process died before becoming healthy — translate stderr into a friendly error.
+            const tail = stderrBuffer.join('\n');
+            const friendly = this._diagnoseBotFailure(tail, port);
+            this._panel.webview.postMessage({ command: 'error', message: friendly });
+            vscode.window.showErrorMessage(friendly);
         }
 
         await this._sendStatus();
+    }
+
+    /**
+     * Convert a chunk of bot stderr into a human-friendly error message that tells
+     * the user exactly what to do. Falls back to a generic message with the tail
+     * appended if no known pattern matches.
+     */
+    private _diagnoseBotFailure(stderrTail: string, port: number): string {
+        const s = stderrTail.toLowerCase();
+
+        if (s.includes('address already in use') || s.includes('eaddrinuse') || s.includes('errno 48') || s.includes('errno 98')) {
+            return `Port ${port} is already in use. Either change the port in GateKeeper Setup or stop the process using it (try: lsof -ti:${port} | xargs kill -9).`;
+        }
+
+        if (s.includes('permission denied') && (s.includes("port") || s.includes('bind'))) {
+            return `Permission denied binding to port ${port}. Pick a port above 1024 in GateKeeper Setup.`;
+        }
+
+        if (s.includes('unauthorized') || s.includes('401') || s.includes('invalid token')) {
+            return 'Telegram rejected the bot token (401 Unauthorized). Get a fresh token from @BotFather and paste it in GateKeeper Setup → Change.';
+        }
+
+        if (s.includes('chat not found') || s.includes('chat_id is empty') || s.includes("bot can't initiate conversation")) {
+            return 'Telegram could not deliver to your Chat ID. Open the bot in Telegram and send /start, then re-check the Chat ID in Setup.';
+        }
+
+        if (s.includes('network is unreachable') || s.includes('temporary failure in name resolution') || s.includes('getaddrinfo') || s.includes('connection refused') || s.includes('ssl') && s.includes('handshake')) {
+            return 'Network error reaching Telegram. Check your internet connection / corporate proxy / firewall, then click Start again.';
+        }
+
+        if (s.includes('modulenotfounderror') || s.includes('no module named')) {
+            const match = stderrTail.match(/No module named ['\"]([^'\"]+)['\"]/);
+            const mod = match ? match[1] : 'a required module';
+            return `Bot failed to import ${mod}. The auto-install may have been incomplete — try restarting (the managed venv will rebuild) or check GateKeeper logs.`;
+        }
+
+        if (s.includes('syntaxerror')) {
+            return 'Python rejected the bot script (SyntaxError). Your Python version may be too old — install Python 3.8+ and restart.';
+        }
+
+        // Generic fallback: show the last few lines verbatim so the user has something to copy/paste.
+        const lines = stderrTail.split('\n').filter(Boolean).slice(-5).join('\n');
+        return lines
+            ? `Bot exited before becoming ready. Last error output:\n${lines}\n\nSee GateKeeper logs for full details.`
+            : 'Bot exited before becoming ready and produced no error output. See GateKeeper logs.';
     }
 
     private async _registerMcpServer(_pythonPath: string, _botScriptPath: string, port: number) {
@@ -534,108 +602,171 @@ export class SetupPanel {
         return undefined;
     }
 
-    private async _ensureBotDeps(pythonPath: string, botScriptPath: string): Promise<boolean> {
-        // Quick check: can Python import the required modules?
-        const checkResult = await new Promise<boolean>((resolve) => {
-            const check = spawn(pythonPath, [
-                '-c',
-                'import telegram, aiohttp, mcp',
-            ], { stdio: 'pipe' });
+    /**
+     * Ensure bot dependencies are importable. Returns the python interpreter
+     * to actually use to run the bot (which may be a managed venv we create
+     * inside the extension's globalStorage). Returns undefined on failure.
+     *
+     * Strategy:
+     *   1. If the given pythonPath can already import telegram/aiohttp/mcp → use it as-is.
+     *   2. Otherwise locate or create a managed venv at <globalStorage>/venv,
+     *      install requirements there, and return the venv's python.
+     *      This avoids PEP 668 ("externally-managed-environment") errors on
+     *      modern macOS/Linux system Pythons and avoids needing sudo.
+     */
+    private async _ensureBotDeps(pythonPath: string, botScriptPath: string): Promise<string | undefined> {
+        const canImport = (py: string) => new Promise<boolean>((resolve) => {
+            const check = spawn(py, ['-c', 'import telegram, aiohttp, mcp'], { stdio: 'pipe' });
             check.on('exit', (code) => resolve(code === 0));
             check.on('error', () => resolve(false));
         });
 
-        if (checkResult) {
-            log('Bot dependencies already installed');
-            return true;
+        // 1. Does the system python already have everything?
+        if (await canImport(pythonPath)) {
+            log(`Bot dependencies already installed on ${pythonPath}`);
+            return pythonPath;
         }
 
-        log('Bot dependencies missing — attempting auto-install');
+        // 2. Check the managed venv (may already exist from a previous run)
+        const venvDir = path.join(this._context.globalStorageUri.fsPath, 'venv');
+        const venvPython = process.platform === 'win32'
+            ? path.join(venvDir, 'Scripts', 'python.exe')
+            : path.join(venvDir, 'bin', 'python');
 
-        // Locate requirements.txt (bundled next to bot.py)
+        if (fs.existsSync(venvPython) && await canImport(venvPython)) {
+            log(`Bot dependencies present in managed venv ${venvPython}`);
+            return venvPython;
+        }
+
+        // 3. Locate requirements.txt (bundled next to bot.py)
         const reqPath = path.join(path.dirname(botScriptPath), 'requirements.txt');
         if (!fs.existsSync(reqPath)) {
-            this._showError(`Cannot auto-install: requirements.txt not found at ${reqPath}. Run: ${pythonPath} -m pip install python-telegram-bot aiohttp mcp`);
-            return false;
+            this._showError(`Cannot auto-install: requirements.txt not found at ${reqPath}`);
+            return undefined;
         }
 
-        // Run pip install with progress notification
+        log(`Bot dependencies missing — creating managed venv at ${venvDir}`);
+
+        // Ensure parent directory exists
+        const parent = path.dirname(venvDir);
+        if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
+
+        const runStep = (cmd: string, args: string[], label: string) =>
+            new Promise<boolean>((resolve) => {
+                log(`Running: ${cmd} ${args.join(' ')}`);
+                const proc = spawn(cmd, args, { stdio: 'pipe' });
+                proc.stdout?.on('data', (d) => log(`[${label}] ${d.toString().trim()}`));
+                proc.stderr?.on('data', (d) => log(`[${label}] ${d.toString().trim()}`));
+                proc.on('exit', (code) => resolve(code === 0));
+                proc.on('error', (err) => {
+                    log(`[${label}] failed to spawn: ${err.message}`);
+                    resolve(false);
+                });
+            });
+
         return await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
-                title: 'GateKeeper: Installing Python dependencies (first-run setup)…',
+                title: 'GateKeeper: setting up Python environment (first-run, ~30s)…',
                 cancellable: false,
             },
-            async () => {
-                return new Promise<boolean>((resolve) => {
-                    // Prefer --user install to avoid permission issues; ignored if inside a venv
-                    const args = ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', reqPath];
-                    // Only add --user if Python is not a venv (venv installs always succeed without --user)
-                    const isVenv = pythonPath.includes('.venv') || pythonPath.includes('venv');
-                    if (!isVenv) args.push('--user');
+            async (progress) => {
+                // Create venv if missing
+                if (!fs.existsSync(venvPython)) {
+                    progress.report({ message: 'creating virtual environment' });
+                    const created = await runStep(pythonPath, ['-m', 'venv', venvDir], 'venv');
+                    if (!created || !fs.existsSync(venvPython)) {
+                        this._showError(
+                            `Failed to create venv at ${venvDir}. Ensure the 'venv' module is available (on Debian/Ubuntu: apt install python3-venv). See GateKeeper logs.`
+                        );
+                        return undefined;
+                    }
+                }
 
-                    log(`Running: ${pythonPath} ${args.join(' ')}`);
-                    const pip = spawn(pythonPath, args, { stdio: 'pipe' });
+                // Upgrade pip inside the venv (best-effort)
+                progress.report({ message: 'upgrading pip' });
+                await runStep(venvPython, ['-m', 'pip', 'install', '--upgrade', '--disable-pip-version-check', 'pip'], 'pip');
 
-                    pip.stdout?.on('data', (d) => log(`[pip] ${d.toString().trim()}`));
-                    pip.stderr?.on('data', (d) => log(`[pip] ${d.toString().trim()}`));
+                // Install requirements into the venv
+                progress.report({ message: 'installing dependencies' });
+                const installed = await runStep(
+                    venvPython,
+                    ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', reqPath],
+                    'pip'
+                );
+                if (!installed) {
+                    this._showError(
+                        `pip install failed inside managed venv. Check GateKeeper logs. You can retry manually: ${venvPython} -m pip install -r ${reqPath}`
+                    );
+                    return undefined;
+                }
 
-                    pip.on('exit', (code) => {
-                        if (code === 0) {
-                            log('pip install succeeded');
-                            vscode.window.showInformationMessage('✅ GateKeeper: Python dependencies installed');
-                            resolve(true);
-                        } else {
-                            this._showError(`pip install failed (exit ${code}). Check GateKeeper logs. You may need to run manually: ${pythonPath} -m pip install -r ${reqPath}`);
-                            resolve(false);
-                        }
-                    });
+                // Verify
+                if (!(await canImport(venvPython))) {
+                    this._showError('Dependencies installed but import check still failed. See GateKeeper logs.');
+                    return undefined;
+                }
 
-                    pip.on('error', (err) => {
-                        this._showError(`Failed to run pip: ${err.message}`);
-                        resolve(false);
-                    });
-                });
+                log(`Managed venv ready at ${venvPython}`);
+                vscode.window.showInformationMessage('✅ GateKeeper: Python environment ready');
+                return venvPython;
             }
         );
     }
 
     private async _findPython(): Promise<string | undefined> {
         const { execSync } = await import('child_process');
-        
-        const pythonCommands = ['python3', 'python', '/usr/bin/python3', '/usr/local/bin/python3'];
-        
+
+        const pythonCommands = ['python3', 'python', '/usr/bin/python3', '/usr/local/bin/python3', '/opt/homebrew/bin/python3'];
+
+        // Returns the python path if it is >= 3.8, otherwise undefined.
+        const versionOk = (cmd: string): string | undefined => {
+            try {
+                const out = execSync(`${cmd} --version`, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+                const m = out.match(/Python\s+(\d+)\.(\d+)/i);
+                if (!m) {
+                    log(`Could not parse version from ${cmd}: ${out}`);
+                    return undefined;
+                }
+                const major = parseInt(m[1], 10);
+                const minor = parseInt(m[2], 10);
+                if (major < 3 || (major === 3 && minor < 8)) {
+                    log(`Python at ${cmd} is too old (${out}); need 3.8+`);
+                    return undefined;
+                }
+                log(`Found Python at ${cmd} (${out})`);
+                return cmd;
+            } catch {
+                return undefined;
+            }
+        };
+
         // Check for venv in bot directory
         const botPath = await this._findBotScript();
         if (botPath) {
             const venvPython = path.join(path.dirname(botPath), '.venv', 'bin', 'python');
             if (fs.existsSync(venvPython)) {
-                log(`Found Python venv at ${venvPython}`);
-                return venvPython;
+                const ok = versionOk(venvPython);
+                if (ok) return ok;
             }
         }
-        
+
         // Check for venv in workspace root
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (workspaceRoot) {
             const workspaceVenv = path.join(workspaceRoot, '.venv', 'bin', 'python');
             if (fs.existsSync(workspaceVenv)) {
-                log(`Found Python venv at ${workspaceVenv}`);
-                return workspaceVenv;
+                const ok = versionOk(workspaceVenv);
+                if (ok) return ok;
             }
         }
 
         for (const cmd of pythonCommands) {
-            try {
-                execSync(`${cmd} --version`, { stdio: 'pipe' });
-                log(`Found Python at ${cmd}`);
-                return cmd;
-            } catch {
-                continue;
-            }
+            const ok = versionOk(cmd);
+            if (ok) return ok;
         }
 
-        log('Python not found');
+        log('Python 3.8+ not found');
         return undefined;
     }
 
