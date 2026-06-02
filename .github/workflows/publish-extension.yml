@@ -7,15 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Version bump type (leave empty to publish current version)'
-        required: false
-        default: ''
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
         type: choice
         options:
-          - ''
           - patch
           - minor
           - major
+
+permissions:
+  contents: write
 
 jobs:
   publish:
@@ -26,6 +28,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -38,10 +43,43 @@ jobs:
       - name: Compile
         run: npm run compile
 
-      - name: Publish to VS Code Marketplace
+      # Version bump, commit, and tag (only on workflow_dispatch)
+      - name: Bump version and create tag
+        if: github.event_name == 'workflow_dispatch'
         run: |
-          if [ -n "${{ github.event.inputs.bump }}" ]; then
-            npx @vscode/vsce publish ${{ github.event.inputs.bump }} -p ${{ secrets.VSCE_PAT }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          npm version ${{ github.event.inputs.bump }} -m "chore: release v%s"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin --tags
+
+      # Get version for release name
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION=$(node -p "require('./package.json').version")
           else
-            npx @vscode/vsce publish -p ${{ secrets.VSCE_PAT }}
+            VERSION="${GITHUB_REF#refs/tags/v}"
           fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      # Package extension
+      - name: Package extension
+        run: npx @vscode/vsce package -o gatekeeper-${{ steps.version.outputs.version }}.vsix
+
+      # Create GitHub Release with VSIX attached
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: vscode-extension/gatekeeper-${{ steps.version.outputs.version }}.vsix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish to VS Code Marketplace
+      - name: Publish to VS Code Marketplace
+        run: npx @vscode/vsce publish --packagePath gatekeeper-${{ steps.version.outputs.version }}.vsix -p ${{ secrets.VSCE_PAT }}
