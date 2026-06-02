@@ -195,9 +195,8 @@ This provides the `run_approved_command` tool for Copilot agent mode.
 
 ## Requirements
 
-- **Python 3.8+** with the GateKeeper bot package
-- Clone the repo: `git clone https://github.com/patelsan/gatekeeper`
-- Install deps: `cd gatekeeper && pip install -r requirements.txt`
+- **Python 3.8+** installed and on `PATH` ([download here](https://www.python.org/downloads/))
+- That's it — the extension bundles the bot and **auto-installs its Python dependencies** (`python-telegram-bot`, `aiohttp`, `mcp`) the first time you click **Start Approval Server**.
 
 ## Troubleshooting
 

@@ -205,12 +205,20 @@ export class SetupPanel {
         if (!pythonPath) {
             botStarting = false;
             this._sendStatus();
-            this._showError('Python not found. Install Python 3.8+ and create a venv: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt');
+            this._showError('Python 3.8+ not found. Please install Python 3 from https://www.python.org/downloads/');
             return;
         }
 
         log(`Starting bot with Python: ${pythonPath}`);
         log(`Bot script: ${botScriptPath}`);
+
+        // Ensure Python dependencies are installed (auto-install on first run)
+        const depsOk = await this._ensureBotDeps(pythonPath, botScriptPath);
+        if (!depsOk) {
+            botStarting = false;
+            this._sendStatus();
+            return;
+        }
 
         // Start the bot process
         botProcess = spawn(pythonPath, [botScriptPath], {
@@ -297,20 +305,33 @@ export class SetupPanel {
             
             // Check if MCP server exists
             if (!fs.existsSync(mcpServerPath)) {
-                log(`Bundled MCP server not found at ${mcpServerPath}`);
+                log(`Bundled MCP server not found at ${mcpServerPath} — skipping auto-registration`);
+                vscode.window.showWarningMessage(
+                    'GateKeeper: bundled MCP server (out/mcpServer.js) not found. Copilot integration will not work until the extension is rebuilt.'
+                );
                 return;
             }
             
-            // Path to VS Code's mcp.json (cross-platform)
+            // Path to VS Code's mcp.json — derive from VS Code's own globalStorageUri so this
+            // works for Code, Code - Insiders, Cursor, VSCodium, and portable installs.
+            // globalStorageUri = <productUserDir>/globalStorage/<extId>  → go up two levels.
             let mcpConfigPath: string;
-            const platform = os.platform();
-            if (platform === 'darwin') {
-                mcpConfigPath = path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User', 'mcp.json');
-            } else if (platform === 'win32') {
-                mcpConfigPath = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'mcp.json');
-            } else {
-                // Linux
-                mcpConfigPath = path.join(os.homedir(), '.config', 'Code', 'User', 'mcp.json');
+            try {
+                const globalStorage = this._context.globalStorageUri.fsPath;
+                const userDir = path.dirname(path.dirname(globalStorage));
+                mcpConfigPath = path.join(userDir, 'mcp.json');
+                log(`Derived mcp.json path from globalStorageUri: ${mcpConfigPath}`);
+            } catch {
+                // Fallback to platform-specific guess
+                const platform = os.platform();
+                if (platform === 'darwin') {
+                    mcpConfigPath = path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User', 'mcp.json');
+                } else if (platform === 'win32') {
+                    mcpConfigPath = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'mcp.json');
+                } else {
+                    mcpConfigPath = path.join(os.homedir(), '.config', 'Code', 'User', 'mcp.json');
+                }
+                log(`Falling back to platform-default mcp.json path: ${mcpConfigPath}`);
             }
             
             // Read existing config or create new
@@ -363,7 +384,9 @@ export class SetupPanel {
             
         } catch (error) {
             log(`Failed to register MCP server: ${error}`);
-            // Don't show error to user - this is optional functionality
+            vscode.window.showWarningMessage(
+                `GateKeeper: MCP auto-registration failed (${error}). See GateKeeper logs. You can register it manually via VS Code's mcp.json.`
+            );
         }
     }
 
@@ -509,6 +532,72 @@ export class SetupPanel {
 
         log(`Bot script not found. Searched: embedded, workspace, parent dir, ~/gatekeeper, config`);
         return undefined;
+    }
+
+    private async _ensureBotDeps(pythonPath: string, botScriptPath: string): Promise<boolean> {
+        // Quick check: can Python import the required modules?
+        const checkResult = await new Promise<boolean>((resolve) => {
+            const check = spawn(pythonPath, [
+                '-c',
+                'import telegram, aiohttp, mcp',
+            ], { stdio: 'pipe' });
+            check.on('exit', (code) => resolve(code === 0));
+            check.on('error', () => resolve(false));
+        });
+
+        if (checkResult) {
+            log('Bot dependencies already installed');
+            return true;
+        }
+
+        log('Bot dependencies missing — attempting auto-install');
+
+        // Locate requirements.txt (bundled next to bot.py)
+        const reqPath = path.join(path.dirname(botScriptPath), 'requirements.txt');
+        if (!fs.existsSync(reqPath)) {
+            this._showError(`Cannot auto-install: requirements.txt not found at ${reqPath}. Run: ${pythonPath} -m pip install python-telegram-bot aiohttp mcp`);
+            return false;
+        }
+
+        // Run pip install with progress notification
+        return await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'GateKeeper: Installing Python dependencies (first-run setup)…',
+                cancellable: false,
+            },
+            async () => {
+                return new Promise<boolean>((resolve) => {
+                    // Prefer --user install to avoid permission issues; ignored if inside a venv
+                    const args = ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', reqPath];
+                    // Only add --user if Python is not a venv (venv installs always succeed without --user)
+                    const isVenv = pythonPath.includes('.venv') || pythonPath.includes('venv');
+                    if (!isVenv) args.push('--user');
+
+                    log(`Running: ${pythonPath} ${args.join(' ')}`);
+                    const pip = spawn(pythonPath, args, { stdio: 'pipe' });
+
+                    pip.stdout?.on('data', (d) => log(`[pip] ${d.toString().trim()}`));
+                    pip.stderr?.on('data', (d) => log(`[pip] ${d.toString().trim()}`));
+
+                    pip.on('exit', (code) => {
+                        if (code === 0) {
+                            log('pip install succeeded');
+                            vscode.window.showInformationMessage('✅ GateKeeper: Python dependencies installed');
+                            resolve(true);
+                        } else {
+                            this._showError(`pip install failed (exit ${code}). Check GateKeeper logs. You may need to run manually: ${pythonPath} -m pip install -r ${reqPath}`);
+                            resolve(false);
+                        }
+                    });
+
+                    pip.on('error', (err) => {
+                        this._showError(`Failed to run pip: ${err.message}`);
+                        resolve(false);
+                    });
+                });
+            }
+        );
     }
 
     private async _findPython(): Promise<string | undefined> {
