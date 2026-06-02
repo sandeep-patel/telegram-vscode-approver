@@ -193,7 +193,7 @@ export class SetupPanel {
         if (!botScriptPath) {
             botStarting = false;
             this._sendStatus();
-            this._showError('Bot script not found. Please ensure the GateKeeper package is installed.');
+            this._showError('Bot script not found. Clone the repo: git clone https://github.com/sandeep-patel/gatekeeper and open it in VS Code.');
             return;
         }
 
@@ -202,7 +202,7 @@ export class SetupPanel {
         if (!pythonPath) {
             botStarting = false;
             this._sendStatus();
-            this._showError('Python not found. Please install Python 3.8+ and try again.');
+            this._showError('Python not found. Install Python 3.8+ and create a venv: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt');
             return;
         }
 
@@ -475,6 +475,13 @@ export class SetupPanel {
     }
 
     private async _findBotScript(): Promise<string | undefined> {
+        // First check for embedded bot (bundled with extension)
+        const embeddedBot = path.join(this._extensionUri.fsPath, 'bot', 'bot.py');
+        if (fs.existsSync(embeddedBot)) {
+            log(`Found embedded bot at ${embeddedBot}`);
+            return embeddedBot;
+        }
+
         // Check several possible locations
         const possiblePaths = [
             // In workspace
@@ -491,16 +498,12 @@ export class SetupPanel {
             if (!basePath) continue;
             const botPath = path.join(basePath, 'bot.py');
             if (fs.existsSync(botPath)) {
+                log(`Found bot at ${botPath}`);
                 return botPath;
             }
         }
 
-        // Check if we have an embedded bot
-        const embeddedBot = path.join(this._extensionUri.fsPath, 'bot', 'bot.py');
-        if (fs.existsSync(embeddedBot)) {
-            return embeddedBot;
-        }
-
+        log(`Bot script not found. Searched: embedded, workspace, parent dir, ~/gatekeeper, config`);
         return undefined;
     }
 
@@ -514,19 +517,32 @@ export class SetupPanel {
         if (botPath) {
             const venvPython = path.join(path.dirname(botPath), '.venv', 'bin', 'python');
             if (fs.existsSync(venvPython)) {
+                log(`Found Python venv at ${venvPython}`);
                 return venvPython;
+            }
+        }
+        
+        // Check for venv in workspace root
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot) {
+            const workspaceVenv = path.join(workspaceRoot, '.venv', 'bin', 'python');
+            if (fs.existsSync(workspaceVenv)) {
+                log(`Found Python venv at ${workspaceVenv}`);
+                return workspaceVenv;
             }
         }
 
         for (const cmd of pythonCommands) {
             try {
                 execSync(`${cmd} --version`, { stdio: 'pipe' });
+                log(`Found Python at ${cmd}`);
                 return cmd;
             } catch {
                 continue;
             }
         }
 
+        log('Python not found');
         return undefined;
     }
 
