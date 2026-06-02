@@ -9,6 +9,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     private isConnected: boolean = false;
     private pendingCount: number = 0;
     private hasToken: boolean = false;
+    private isStarting: boolean = false;
 
     constructor(context: vscode.ExtensionContext) {
         this._context = context;
@@ -57,11 +58,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         setTimeout(() => this._sendStatus(), 100);
     }
 
-    public updateStatus(connected: boolean, pending: number, running: boolean, hasToken: boolean) {
+    public updateStatus(connected: boolean, pending: number, running: boolean, hasToken: boolean, starting: boolean = false) {
         this.isConnected = connected;
         this.pendingCount = pending;
         this.isRunning = running;
         this.hasToken = hasToken;
+        this.isStarting = starting;
         this._sendStatus();
     }
 
@@ -73,6 +75,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 pendingCount: this.pendingCount,
                 isRunning: this.isRunning,
                 hasToken: this.hasToken,
+                isStarting: this.isStarting,
             });
         }
     }
@@ -109,6 +112,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             border: 1px solid rgba(76, 175, 80, 0.3);
         }
         .status-stopped {
+            background: rgba(255, 152, 0, 0.15);
+            border: 1px solid rgba(255, 152, 0, 0.3);
+        }
+        .status-starting {
             background: rgba(255, 152, 0, 0.15);
             border: 1px solid rgba(255, 152, 0, 0.3);
         }
@@ -224,7 +231,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             
             let icon, title, subtitle, cardClass;
             
-            if (status.isRunning || status.isConnected) {
+            if (status.isStarting) {
+                icon = '🟠';
+                title = 'Starting...';
+                subtitle = 'Please wait while the server starts';
+                cardClass = 'status-starting';
+                setupBtn.textContent = '⏳ Starting...';
+                setupBtn.disabled = true;
+            } else if (status.isRunning || status.isConnected) {
                 icon = '🟢';
                 title = 'Server Running';
                 subtitle = status.pendingCount > 0 
@@ -232,18 +246,21 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     : 'Ready for approvals';
                 cardClass = 'status-running';
                 setupBtn.textContent = '⚙️ Configure';
+                setupBtn.disabled = false;
             } else if (status.hasToken) {
                 icon = '🟡';
                 title = 'Server Stopped';
                 subtitle = 'Click Setup to start';
                 cardClass = 'status-stopped';
                 setupBtn.textContent = '🚀 Start Server';
+                setupBtn.disabled = false;
             } else {
                 icon = '⚪';
                 title = 'Not Configured';
                 subtitle = 'Set up your Telegram bot';
                 cardClass = 'status-notconfigured';
                 setupBtn.textContent = '⚙️ Setup';
+                setupBtn.disabled = false;
             }
             
             card.className = 'status-card ' + cardClass;

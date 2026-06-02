@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 
 let botProcess: ChildProcess | undefined;
+let botStarting: boolean = false;
 let outputChannel: vscode.OutputChannel | undefined;
 
 export function setOutputChannel(channel: vscode.OutputChannel) {
@@ -108,6 +109,7 @@ export class SetupPanel {
             isRunning,
             processRunning, // We started it
             serverResponding, // Something is responding
+            isStarting: botStarting, // In the process of starting
         });
     }
 
@@ -176,6 +178,10 @@ export class SetupPanel {
     }
 
     private async _startBot(token: string, chatId: string, port: number) {
+        // Set starting state
+        botStarting = true;
+        this._sendStatus();
+
         // Stop existing bot if running
         if (botProcess && !botProcess.killed) {
             botProcess.kill();
@@ -185,6 +191,8 @@ export class SetupPanel {
         // Find the bot script
         const botScriptPath = await this._findBotScript();
         if (!botScriptPath) {
+            botStarting = false;
+            this._sendStatus();
             this._showError('Bot script not found. Please ensure the GateKeeper package is installed.');
             return;
         }
@@ -192,6 +200,8 @@ export class SetupPanel {
         // Find Python
         const pythonPath = await this._findPython();
         if (!pythonPath) {
+            botStarting = false;
+            this._sendStatus();
             this._showError('Python not found. Please install Python 3.8+ and try again.');
             return;
         }
@@ -222,25 +232,50 @@ export class SetupPanel {
 
         botProcess.on('error', (error) => {
             log(`[Bot] Failed to start: ${error.message}`);
+            botStarting = false;
             this._panel.webview.postMessage({ command: 'error', message: `Failed to start bot: ${error.message}` });
+            this._sendStatus();
         });
 
         botProcess.on('exit', (code) => {
             log(`[Bot] Exited with code ${code}`);
             botProcess = undefined;
+            botStarting = false;
             this._sendStatus();
         });
 
-        // Wait a moment for the bot to start
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Poll health endpoint until server responds (up to 10 seconds)
+        let serverReady = false;
+        
+        for (let i = 0; i < 20; i++) { // 20 attempts x 500ms = 10 seconds max
+            await new Promise(resolve => setTimeout(resolve, 500));
+            if (await this._checkServerHealth(port)) {
+                serverReady = true;
+                break;
+            }
+            // Check if process died while waiting
+            if (!botProcess || botProcess.killed) {
+                break;
+            }
+        }
 
-        if (botProcess && !botProcess.killed) {
+        // Clear starting state
+        botStarting = false;
+
+        if (serverReady && botProcess && !botProcess.killed) {
             this._panel.webview.postMessage({ command: 'started' });
             vscode.window.showInformationMessage('✅ GateKeeper server started successfully!');
             log('Bot started successfully');
             
+            // Trigger immediate sidebar/status bar update (silent, no notification)
+            vscode.commands.executeCommand('gatekeeper.refreshStatus');
+            
             // Auto-register MCP server
             await this._registerMcpServer(pythonPath, botScriptPath, port);
+        } else if (botProcess && !botProcess.killed) {
+            // Process is running but server not responding
+            log('Bot process running but server not responding to health checks');
+            this._panel.webview.postMessage({ command: 'error', message: 'Server started but not responding. Check logs.' });
         }
 
         await this._sendStatus();
@@ -617,6 +652,10 @@ export class SetupPanel {
             background: rgba(255, 152, 0, 0.1);
             border: 1px solid rgba(255, 152, 0, 0.3);
         }
+        .status-starting {
+            background: rgba(255, 152, 0, 0.15);
+            border: 1px solid rgba(255, 152, 0, 0.5);
+        }
         .status-icon {
             font-size: 24px;
         }
@@ -842,7 +881,22 @@ export class SetupPanel {
             const stopBtn = document.getElementById('stop-btn');
             const testBtn = document.getElementById('test-btn');
 
-            if (status.isRunning && status.hasToken) {
+            if (status.isStarting) {
+                // Server is starting
+                statusCard.className = 'status-card status-starting';
+                statusCard.innerHTML = \`
+                    <span class="status-icon">🟠</span>
+                    <div class="status-text">
+                        <div class="status-title">Starting...</div>
+                        <div class="status-subtitle">Please wait while the server starts</div>
+                    </div>
+                \`;
+                startBtn.style.display = 'block';
+                startBtn.textContent = '⏳ Starting...';
+                startBtn.disabled = true;
+                stopBtn.style.display = 'none';
+                testBtn.style.display = 'none';
+            } else if (status.isRunning && status.hasToken) {
                 // Server running and we have config
                 statusCard.className = 'status-card status-running';
                 statusCard.innerHTML = \`
@@ -990,6 +1044,10 @@ export function stopBotProcess() {
 
 export function isBotRunning(): boolean {
     return botProcess !== undefined && !botProcess.killed;
+}
+
+export function isBotStarting(): boolean {
+    return botStarting;
 }
 
 /**
