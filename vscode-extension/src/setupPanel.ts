@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
+import { parse as parseJsonc, ParseError } from 'jsonc-parser';
 
 let botProcess: ChildProcess | undefined;
 let botStarting: boolean = false;
@@ -325,7 +326,14 @@ export class SetupPanel {
         const s = stderrTail.toLowerCase();
 
         if (s.includes('address already in use') || s.includes('eaddrinuse') || s.includes('errno 48') || s.includes('errno 98')) {
-            return `Port ${port} is already in use. Either change the port in GateKeeper Setup or stop the process using it (try: lsof -ti:${port} | xargs kill -9).`;
+            const killHint = process.platform === 'win32'
+                ? `netstat -ano | findstr :${port}  (then: taskkill /F /PID <pid>)`
+                : `lsof -ti:${port} | xargs kill -9`;
+            return `Port ${port} is already in use. Either change the port in GateKeeper Setup or stop the process using it (try: ${killHint}).`;
+        }
+
+        if (s.includes('conflict') && (s.includes('getupdates') || s.includes('terminated by other'))) {
+            return 'Another instance of this bot is already polling Telegram (HTTP 409 Conflict). Stop any other running copies (other VS Code windows, docker containers, scripts) or revoke + recreate the token in @BotFather, then try again.';
         }
 
         if (s.includes('permission denied') && (s.includes("port") || s.includes('bind'))) {
@@ -402,15 +410,24 @@ export class SetupPanel {
                 log(`Falling back to platform-default mcp.json path: ${mcpConfigPath}`);
             }
             
-            // Read existing config or create new
+            // Read existing config or create new. mcp.json supports JSONC (comments,
+            // trailing commas), so we MUST use a JSONC parser — not JSON.parse — or we
+            // would refuse to parse and end up wiping the user's other MCP servers.
             let mcpConfig: { servers: Record<string, any>; inputs?: any[] } = { servers: {}, inputs: [] };
             if (fs.existsSync(mcpConfigPath)) {
-                try {
-                    const content = fs.readFileSync(mcpConfigPath, 'utf8');
-                    mcpConfig = JSON.parse(content);
-                } catch {
-                    log('Failed to parse existing mcp.json, will overwrite');
+                const content = fs.readFileSync(mcpConfigPath, 'utf8');
+                const errors: ParseError[] = [];
+                const parsed = parseJsonc(content, errors, { allowTrailingComma: true });
+                if (errors.length > 0 || typeof parsed !== 'object' || parsed === null) {
+                    // Don't overwrite a file we couldn't safely parse — surface and bail.
+                    const errMsg = errors.length > 0 ? `parse errors at offset(s) ${errors.map(e => e.offset).join(', ')}` : 'unexpected top-level value';
+                    log(`Refusing to overwrite mcp.json: ${errMsg}`);
+                    vscode.window.showWarningMessage(
+                        `GateKeeper: could not safely parse ${mcpConfigPath} (${errMsg}). Fix the file manually or delete it, then click Start again. MCP not registered to avoid clobbering your other servers.`
+                    );
+                    return;
                 }
+                mcpConfig = parsed as typeof mcpConfig;
             }
             
             // Check if already configured with correct path
@@ -461,26 +478,40 @@ export class SetupPanel {
     private async _stopBot() {
         const config = vscode.workspace.getConfiguration('gatekeeper');
         const port = config.get<number>('httpPort') || 8765;
-        
+
         // Kill our process if we started it
         if (botProcess && !botProcess.killed) {
             botProcess.kill();
             botProcess = undefined;
             log('Bot process stopped');
         }
-        
-        // Also try to kill any process on the port (in case started externally)
+
+        // Also try to kill any process on the port (in case started externally or our
+        // child reference was lost). Branch on platform — lsof/xargs only exist on Unix.
         try {
             const { execSync } = require('child_process');
-            // Find and kill process on the port
-            execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
-            log(`Killed any process on port ${port}`);
+            if (process.platform === 'win32') {
+                // Find PIDs listening on the port via netstat, then taskkill each.
+                const out = execSync(`netstat -ano -p tcp | findstr :${port}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+                const pids = new Set<string>();
+                for (const line of out.split(/\r?\n/)) {
+                    const m = line.trim().match(/LISTENING\s+(\d+)$/i);
+                    if (m) pids.add(m[1]);
+                }
+                for (const pid of pids) {
+                    try { execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' }); } catch { /* ignore */ }
+                }
+                if (pids.size > 0) log(`Killed PIDs on port ${port}: ${[...pids].join(', ')}`);
+            } else {
+                execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+                log(`Killed any process on port ${port}`);
+            }
         } catch {
-            // Ignore errors
+            // Ignore errors — nothing was listening, or we lack permission.
         }
-        
+
         vscode.window.showInformationMessage('Extension stopped');
-        
+
         // Wait a moment for the process to die
         await new Promise(resolve => setTimeout(resolve, 500));
         await this._sendStatus();
@@ -1348,15 +1379,18 @@ export async function ensureMcpRegistration(context: vscode.ExtensionContext) {
             mcpConfigPath = path.join(os.homedir(), '.config', 'Code', 'User', 'mcp.json');
         }
         
-        // Read existing config
+        // Read existing config. mcp.json supports JSONC — use a tolerant parser so we
+        // don't bail on a file that VS Code itself accepts (and never overwrite on parse failure).
         let mcpConfig: { servers: Record<string, any>; inputs?: any[] } = { servers: {}, inputs: [] };
         if (fs.existsSync(mcpConfigPath)) {
-            try {
-                const content = fs.readFileSync(mcpConfigPath, 'utf8');
-                mcpConfig = JSON.parse(content);
-            } catch {
-                return; // Can't parse, don't overwrite
+            const content = fs.readFileSync(mcpConfigPath, 'utf8');
+            const errors: ParseError[] = [];
+            const parsed = parseJsonc(content, errors, { allowTrailingComma: true });
+            if (errors.length > 0 || typeof parsed !== 'object' || parsed === null) {
+                log(`Skipping MCP path refresh: could not parse ${mcpConfigPath}`);
+                return;
             }
+            mcpConfig = parsed as typeof mcpConfig;
         }
         
         // Check if already configured with correct path
