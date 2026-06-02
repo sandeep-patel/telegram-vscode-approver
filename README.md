@@ -134,7 +134,48 @@ For deeper Copilot agent integration, add the MCP server:
 
 This provides the `run_approved_command` tool for Copilot.
 
-### Option C: Direct HTTP API
+### Option C: Claude Desktop App
+
+GateKeeper also works with the Claude Desktop app!
+
+**1. Start the approval server manually:**
+
+```bash
+cd /path/to/gatekeeper
+source .venv/bin/activate
+TELEGRAM_BOT_TOKEN=your_token TELEGRAM_CHAT_ID=your_id python bot.py
+```
+
+Or use a process manager like `pm2` or `launchd` (see "Running as a Service" below).
+
+**2. Add to Claude Desktop config:**
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "gatekeeper": {
+      "command": "node",
+      "args": ["/path/to/gatekeeper/vscode-extension/out/mcpServer.js"],
+      "env": {
+        "GATEKEEPER_URL": "http://localhost:8765"
+      }
+    }
+  }
+}
+```
+
+**3. Restart Claude Desktop**
+
+Claude will now have access to these tools:
+- `run_approved_command` — Run shell commands with Telegram approval
+- `ask_user` — Ask questions and get responses via Telegram
+- `check_approval_server` — Check if the server is running
+
+**Note:** Unlike VS Code, Claude Desktop doesn't show local notifications — all approvals go directly to Telegram.
+
+### Option D: Direct HTTP API
 
 Any tool can request approval:
 
