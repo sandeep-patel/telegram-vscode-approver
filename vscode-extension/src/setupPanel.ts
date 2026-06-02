@@ -59,7 +59,7 @@ export class SetupPanel {
             async (message) => {
                 switch (message.command) {
                     case 'saveAndStart':
-                        await this._saveAndStart(message.token, message.chatId, message.port, message.localApprovalDelay, message.useExistingToken);
+                        await this._saveAndStart(message.token, message.chatId, message.port, message.localApprovalDelay, message.preventSleep, message.useExistingToken);
                         break;
                     case 'stop':
                         await this._stopBot();
@@ -89,6 +89,7 @@ export class SetupPanel {
         const chatId = config.get<string>('chatId') || '';
         const port = config.get<number>('httpPort') || 8765;
         const localApprovalDelay = config.get<number>('localApprovalDelay') || 10;
+        const preventSleep = config.get<boolean>('preventSleep') ?? true;
         
         // Check if we started the bot process
         const processRunning = botProcess !== undefined && !botProcess.killed;
@@ -106,6 +107,7 @@ export class SetupPanel {
             chatId,
             port,
             localApprovalDelay,
+            preventSleep,
             isRunning,
             processRunning, // We started it
             serverResponding, // Something is responding
@@ -128,7 +130,7 @@ export class SetupPanel {
         });
     }
 
-    private async _saveAndStart(token: string, chatId: string, port: number, localApprovalDelay: number, useExistingToken: boolean = false) {
+    private async _saveAndStart(token: string, chatId: string, port: number, localApprovalDelay: number, preventSleep: boolean, useExistingToken: boolean = false) {
         try {
             // Get existing token if using existing
             let finalToken = token;
@@ -164,20 +166,21 @@ export class SetupPanel {
             await config.update('chatId', chatId, vscode.ConfigurationTarget.Global);
             await config.update('httpPort', port, vscode.ConfigurationTarget.Global);
             await config.update('localApprovalDelay', localApprovalDelay, vscode.ConfigurationTarget.Global);
+            await config.update('preventSleep', preventSleep, vscode.ConfigurationTarget.Global);
             await config.update('serverUrl', `http://localhost:${port}`, vscode.ConfigurationTarget.Global);
             await config.update('enabled', true, vscode.ConfigurationTarget.Global);
 
-            log(`Saved configuration - ChatID: ${chatId}, Port: ${port}, Local Delay: ${localApprovalDelay}s`);
+            log(`Saved configuration - ChatID: ${chatId}, Port: ${port}, Local Delay: ${localApprovalDelay}s, Prevent Sleep: ${preventSleep}`);
 
             // Start the bot
-            await this._startBot(finalToken, chatId, port);
+            await this._startBot(finalToken, chatId, port, preventSleep);
 
         } catch (error) {
             this._showError(`Failed to save settings: ${error}`);
         }
     }
 
-    private async _startBot(token: string, chatId: string, port: number) {
+    private async _startBot(token: string, chatId: string, port: number, preventSleep: boolean = true) {
         // Set starting state
         botStarting = true;
         this._sendStatus();
@@ -216,6 +219,7 @@ export class SetupPanel {
                 TELEGRAM_BOT_TOKEN: token,
                 TELEGRAM_CHAT_ID: chatId,
                 APPROVAL_HTTP_PORT: String(port),
+                PREVENT_SLEEP: preventSleep ? 'true' : 'false',
             },
             cwd: path.dirname(botScriptPath),
         });
@@ -735,6 +739,21 @@ export class SetupPanel {
         .advanced-section.show {
             display: block;
         }
+        .checkbox-group {
+            margin-top: 12px;
+        }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-weight: normal;
+        }
+        .checkbox-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -796,6 +815,13 @@ export class SetupPanel {
                 <input type="number" id="localDelay" value="10" min="0" max="300">
                 <p class="help-text">Wait this long for VS Code approval before sending to Telegram</p>
             </div>
+            <div class="form-group checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="preventSleep" checked>
+                    <span>☕ Prevent Mac from sleeping</span>
+                </label>
+                <p class="help-text">Keep your Mac awake while the server is running (macOS only)</p>
+            </div>
         </div>
 
         <div class="button-row">
@@ -814,6 +840,7 @@ export class SetupPanel {
     <script>
         const vscode = acquireVsCodeApi();
         let isRunning = false;
+        let initialStatusReceived = false;  // Only update form fields on first status
 
         function openBotFather() {
             vscode.postMessage({ command: 'openBotFather' });
@@ -830,6 +857,7 @@ export class SetupPanel {
             const chatId = document.getElementById('chatId').value.trim();
             const port = parseInt(document.getElementById('port').value) || 8765;
             const localApprovalDelay = parseInt(document.getElementById('localDelay').value) || 10;
+            const preventSleep = document.getElementById('preventSleep').checked;
             
             // Check if token is configured (input is hidden) or newly entered
             const useExistingToken = tokenConfigured.style.display !== 'none';
@@ -849,7 +877,7 @@ export class SetupPanel {
             document.getElementById('start-btn').textContent = '⏳ Starting...';
 
             // Send empty token to indicate "use existing"
-            vscode.postMessage({ command: 'saveAndStart', token: token || '', chatId, port, localApprovalDelay, useExistingToken });
+            vscode.postMessage({ command: 'saveAndStart', token: token || '', chatId, port, localApprovalDelay, preventSleep, useExistingToken });
         }
 
         function stopBot() {
@@ -978,15 +1006,20 @@ export class SetupPanel {
             console.log('Received message:', message);
             switch (message.command) {
                 case 'status':
-                    if (message.chatId) document.getElementById('chatId').value = message.chatId;
-                    if (message.port) document.getElementById('port').value = message.port;
-                    if (message.localApprovalDelay !== undefined) document.getElementById('localDelay').value = message.localApprovalDelay;
-                    // Show token status
-                    if (message.hasToken && message.token) {
-                        document.getElementById('token-configured').style.display = 'block';
-                        document.getElementById('token-masked').textContent = message.token;
-                        document.getElementById('token').style.display = 'none';
-                        document.getElementById('token-help').style.display = 'none';
+                    // Only populate form fields on initial load to avoid overwriting user edits
+                    if (!initialStatusReceived) {
+                        initialStatusReceived = true;
+                        if (message.chatId) document.getElementById('chatId').value = message.chatId;
+                        if (message.port) document.getElementById('port').value = message.port;
+                        if (message.localApprovalDelay !== undefined) document.getElementById('localDelay').value = message.localApprovalDelay;
+                        if (message.preventSleep !== undefined) document.getElementById('preventSleep').checked = message.preventSleep;
+                        // Show token status
+                        if (message.hasToken && message.token) {
+                            document.getElementById('token-configured').style.display = 'block';
+                            document.getElementById('token-masked').textContent = message.token;
+                            document.getElementById('token').style.display = 'none';
+                            document.getElementById('token-help').style.display = 'none';
+                        }
                     }
                     updateUI(message);
                     break;
