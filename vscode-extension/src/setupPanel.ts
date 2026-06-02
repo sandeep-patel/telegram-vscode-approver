@@ -244,19 +244,35 @@ export class SetupPanel {
             this._sendStatus();
         });
 
-        // Wait a moment for the bot to start
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Poll health endpoint until server responds (up to 10 seconds)
+        let serverReady = false;
+        
+        for (let i = 0; i < 20; i++) { // 20 attempts x 500ms = 10 seconds max
+            await new Promise(resolve => setTimeout(resolve, 500));
+            if (await this._checkServerHealth(port)) {
+                serverReady = true;
+                break;
+            }
+            // Check if process died while waiting
+            if (!botProcess || botProcess.killed) {
+                break;
+            }
+        }
 
         // Clear starting state
         botStarting = false;
 
-        if (botProcess && !botProcess.killed) {
+        if (serverReady && botProcess && !botProcess.killed) {
             this._panel.webview.postMessage({ command: 'started' });
             vscode.window.showInformationMessage('✅ GateKeeper server started successfully!');
             log('Bot started successfully');
             
             // Auto-register MCP server
             await this._registerMcpServer(pythonPath, botScriptPath, port);
+        } else if (botProcess && !botProcess.killed) {
+            // Process is running but server not responding
+            log('Bot process running but server not responding to health checks');
+            this._panel.webview.postMessage({ command: 'error', message: 'Server started but not responding. Check logs.' });
         }
 
         await this._sendStatus();
