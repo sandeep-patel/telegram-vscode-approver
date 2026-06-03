@@ -80,6 +80,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publish to VS Code Marketplace
+      # Publish to VS Code Marketplace (tolerate already-published versions)
       - name: Publish to VS Code Marketplace
-        run: npx @vscode/vsce publish --packagePath gatekeeper-${{ steps.version.outputs.version }}.vsix -p ${{ secrets.VSCE_PAT }}
+        run: |
+          set +e
+          OUTPUT=$(npx @vscode/vsce publish --packagePath gatekeeper-${{ steps.version.outputs.version }}.vsix -p ${{ secrets.VSCE_PAT }} 2>&1)
+          EXIT=$?
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ] && echo "$OUTPUT" | grep -qi 'already exists'; then
+            echo "::warning::Version ${{ steps.version.outputs.version }} already on marketplace — skipping publish."
+            exit 0
+          fi
+          exit $EXIT
