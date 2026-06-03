@@ -2,7 +2,7 @@
     "name": "gatekeeper-remote-approval",
     "displayName": "GateKeeper - Remote Command Approval",
     "description": "Route VS Code Copilot command approvals to your phone via Telegram, Slack, or other channels",
-    "version": "3.0.0",
+    "version": "4.0.0",
     "publisher": "technologica",
     "icon": "icon.png",
     "repository": {
