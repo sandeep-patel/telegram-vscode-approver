@@ -2,6 +2,8 @@
 
 Approve VS Code Copilot terminal commands from your phone! 📱✅
 
+> 💡 **Just want it to work in VS Code?** Install the [GateKeeper extension](./vscode-extension/) for one-click setup — no manual install required.
+
 ## Supported Channels
 
 | Channel | Status |
@@ -265,10 +267,16 @@ gatekeeper/
 └── README.md
 ```
 
-## License
+## Configure Copilot to Use GateKeeper
 
-MIT
-└── README.md
+Add custom instructions so Copilot routes terminal commands through GateKeeper. See the [extension README](./vscode-extension/README.md#configure-copilot-to-use-gatekeeper) for the full setup — short version:
+
+**Workspace** — create `.github/copilot-instructions.md`:
+
+```markdown
+## Terminal Commands
+
+Always use `mcp_gatekeeper_run_approved_command` for all shell commands.
 ```
 
 ## License

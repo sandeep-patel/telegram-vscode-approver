@@ -118,10 +118,17 @@ ask_user(
 | `gatekeeper.serverUrl` | Server HTTP URL | `http://localhost:8765` |
 | `gatekeeper.timeoutSeconds` | Total approval timeout | `300` |
 | `gatekeeper.localApprovalDelay` | Seconds to wait for VS Code approval before Telegram | `10` |
+| `gatekeeper.autoApprovePatterns` | Regex patterns for commands to auto-approve | `[]` |
+
+Example auto-approve safe read-only commands:
 
 ```json
 {
     "gatekeeper.autoApprovePatterns": [
+        "^ls\\b",
+        "^git status\\b",
+        "^pwd$"
+    ]
 }
 ```
 
@@ -131,13 +138,34 @@ By default, Copilot uses its built-in terminal tool. To make Copilot always use 
 
 ### Option 1: User-Level (All Workspaces)
 
-Create `~/.github/copilot-instructions.md`:
+Add a user instruction file that VS Code applies to every workspace. Enable prompt/instruction files first:
+
+```json
+// settings.json
+"chat.promptFiles": true
+```
+
+Then create a file in your VS Code user profile (macOS path shown; use the equivalent `Code/User/prompts/` folder on Windows/Linux):
+
+`~/Library/Application Support/Code/User/prompts/gatekeeper.instructions.md`
 
 ```markdown
+---
+applyTo: "**"
+---
+
 ## Terminal Commands
 
 Always use `mcp_gatekeeper_run_approved_command` for terminal commands instead of `run_in_terminal`.
 This enables approval flow when the GateKeeper server is running, or executes directly when not.
+```
+
+Alternatively, set it in `settings.json`:
+
+```json
+"github.copilot.chat.codeGeneration.instructions": [
+  { "text": "Always use `mcp_gatekeeper_run_approved_command` for terminal commands instead of `run_in_terminal`." }
+]
 ```
 
 ### Option 2: Workspace-Level (Per Project)
