@@ -213,7 +213,7 @@ export class SetupPanel {
         if (!pythonPath) {
             botStarting = false;
             this._sendStatus();
-            this._showError('Python 3.8+ not found. Please install Python 3 from https://www.python.org/downloads/');
+            this._showError('Python 3.10+ not found. Please install Python 3.10 or newer from https://www.python.org/downloads/');
             return;
         }
 
@@ -682,16 +682,30 @@ export class SetupPanel {
         const parent = path.dirname(venvDir);
         if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
 
-        const runStep = (cmd: string, args: string[], label: string) =>
-            new Promise<boolean>((resolve) => {
+        const runStep = (cmd: string, args: string[], label: string): Promise<{ ok: boolean; stderrTail: string }> =>
+            new Promise((resolve) => {
                 log(`Running: ${cmd} ${args.join(' ')}`);
                 const proc = spawn(cmd, args, { stdio: 'pipe' });
-                proc.stdout?.on('data', (d) => log(`[${label}] ${d.toString().trim()}`));
-                proc.stderr?.on('data', (d) => log(`[${label}] ${d.toString().trim()}`));
-                proc.on('exit', (code) => resolve(code === 0));
+                const errLines: string[] = [];
+                const pushTail = (line: string) => {
+                    if (!line) return;
+                    errLines.push(line);
+                    if (errLines.length > 20) errLines.shift();
+                };
+                proc.stdout?.on('data', (d) => {
+                    const text = d.toString();
+                    log(`[${label}] ${text.trim()}`);
+                    text.split(/\r?\n/).forEach(pushTail);
+                });
+                proc.stderr?.on('data', (d) => {
+                    const text = d.toString();
+                    log(`[${label}] ${text.trim()}`);
+                    text.split(/\r?\n/).forEach(pushTail);
+                });
+                proc.on('exit', (code) => resolve({ ok: code === 0, stderrTail: errLines.join('\n').trim() }));
                 proc.on('error', (err) => {
                     log(`[${label}] failed to spawn: ${err.message}`);
-                    resolve(false);
+                    resolve({ ok: false, stderrTail: `failed to spawn ${cmd}: ${err.message}` });
                 });
             });
 
@@ -706,9 +720,10 @@ export class SetupPanel {
                 if (!fs.existsSync(venvPython)) {
                     progress.report({ message: 'creating virtual environment' });
                     const created = await runStep(pythonPath, ['-m', 'venv', venvDir], 'venv');
-                    if (!created || !fs.existsSync(venvPython)) {
+                    if (!created.ok || !fs.existsSync(venvPython)) {
+                        const tail = created.stderrTail ? `\n\nLast output:\n${created.stderrTail}` : '';
                         this._showError(
-                            `Failed to create venv at ${venvDir}. Ensure the 'venv' module is available (on Debian/Ubuntu: apt install python3-venv). See GateKeeper logs.`
+                            `Failed to create venv at ${venvDir}. Ensure the 'venv' module is available (on Debian/Ubuntu: apt install python3-venv).${tail}`
                         );
                         return undefined;
                     }
@@ -725,9 +740,10 @@ export class SetupPanel {
                     ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', reqPath],
                     'pip'
                 );
-                if (!installed) {
+                if (!installed.ok) {
+                    const tail = installed.stderrTail ? `\n\nLast pip output:\n${installed.stderrTail}` : '';
                     this._showError(
-                        `pip install failed inside managed venv. Check GateKeeper logs. You can retry manually: ${venvPython} -m pip install -r ${reqPath}`
+                        `pip install failed inside managed venv. Retry manually: ${venvPython} -m pip install -r ${reqPath}${tail}`
                     );
                     return undefined;
                 }
@@ -761,8 +777,8 @@ export class SetupPanel {
                 }
                 const major = parseInt(m[1], 10);
                 const minor = parseInt(m[2], 10);
-                if (major < 3 || (major === 3 && minor < 8)) {
-                    log(`Python at ${cmd} is too old (${out}); need 3.8+`);
+                if (major < 3 || (major === 3 && minor < 10)) {
+                    log(`Python at ${cmd} is too old (${out}); need 3.10+`);
                     return undefined;
                 }
                 log(`Found Python at ${cmd} (${out})`);
@@ -797,7 +813,7 @@ export class SetupPanel {
             if (ok) return ok;
         }
 
-        log('Python 3.8+ not found');
+        log('Python 3.10+ not found');
         return undefined;
     }
 

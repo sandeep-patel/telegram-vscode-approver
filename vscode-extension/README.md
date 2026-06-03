@@ -195,14 +195,15 @@ This provides the `run_approved_command` tool for Copilot agent mode.
 
 ## Requirements
 
-- **Python 3.8+** installed and on `PATH` ([download here](https://www.python.org/downloads/))
+- **Python 3.10+** installed and on `PATH` ([download here](https://www.python.org/downloads/)) — required by the bundled `mcp` package
 - That's it — the extension bundles the bot and **auto-installs its Python dependencies** (`python-telegram-bot`, `aiohttp`, `mcp`) the first time you click **Start Approval Server**.
 
 ## Troubleshooting
 
 ### Server not starting?
 1. Check `GateKeeper: Show Logs` for errors
-2. Verify Python is installed: `python3 --version`
+2. Verify Python is installed and **3.10 or newer**: `python3 --version`
+   - Older? Install a newer one: `brew install python@3.12` (macOS) or grab the installer from python.org
 3. Ensure bot dependencies are installed
 
 ### Not receiving messages?
