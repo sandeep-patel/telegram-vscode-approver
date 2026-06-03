@@ -213,7 +213,7 @@ export class SetupPanel {
         if (!pythonPath) {
             botStarting = false;
             this._sendStatus();
-            this._showError('Python 3.10+ not found. Please install Python 3.10 or newer from https://www.python.org/downloads/');
+            await this._offerPythonInstall();
             return;
         }
 
@@ -815,6 +815,52 @@ export class SetupPanel {
 
         log('Python 3.10+ not found');
         return undefined;
+    }
+
+    /**
+     * Surfaces a Python-missing error. On macOS with Homebrew available, offers
+     * a one-click "Install Python 3.12" action that runs `brew install python@3.12`
+     * in a visible terminal. Elsewhere, falls back to a download link.
+     */
+    private async _offerPythonInstall(): Promise<void> {
+        const downloadUrl = 'https://www.python.org/downloads/';
+        const baseMsg = 'Python 3.10+ not found.';
+
+        const brewAvailable = process.platform === 'darwin' && (() => {
+            try {
+                const { execSync } = require('child_process');
+                execSync('command -v brew', { stdio: 'ignore' });
+                return true;
+            } catch {
+                return false;
+            }
+        })();
+
+        if (brewAvailable) {
+            const choice = await vscode.window.showErrorMessage(
+                `${baseMsg} Install Python 3.12 via Homebrew?`,
+                'Install via Homebrew',
+                'Open python.org',
+            );
+            if (choice === 'Install via Homebrew') {
+                const term = vscode.window.createTerminal({ name: 'GateKeeper: Install Python' });
+                term.show(true);
+                term.sendText('brew install python@3.12 && echo "\\n✅ Python 3.12 installed. Click \\"Start Approval Server\\" in the GateKeeper sidebar to retry."');
+                return;
+            }
+            if (choice === 'Open python.org') {
+                vscode.env.openExternal(vscode.Uri.parse(downloadUrl));
+            }
+            return;
+        }
+
+        const choice = await vscode.window.showErrorMessage(
+            `${baseMsg} Please install Python 3.10 or newer.`,
+            'Open python.org',
+        );
+        if (choice === 'Open python.org') {
+            vscode.env.openExternal(vscode.Uri.parse(downloadUrl));
+        }
     }
 
     private _showError(message: string) {
