@@ -151,9 +151,9 @@
         "vscode:uninstall": "node ./out/uninstall.js",
         "compile": "tsc -p ./ && npm run bundle:extension && npm run bundle:mcp && npm run bundle:uninstall",
         "compile:extension": "tsc -p ./",
-        "bundle:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=out/extension.js --format=cjs --external:vscode",
-        "bundle:mcp": "esbuild src/mcpServer.ts --bundle --platform=node --target=node18 --outfile=out/mcpServer.js --format=cjs",
-        "bundle:uninstall": "esbuild src/uninstall.ts --bundle --platform=node --target=node18 --outfile=out/uninstall.js --format=cjs",
+        "bundle:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=out/extension.js --format=cjs --external:vscode --main-fields=module,main",
+        "bundle:mcp": "esbuild src/mcpServer.ts --bundle --platform=node --target=node18 --outfile=out/mcpServer.js --format=cjs --main-fields=module,main",
+        "bundle:uninstall": "esbuild src/uninstall.ts --bundle --platform=node --target=node18 --outfile=out/uninstall.js --format=cjs --main-fields=module,main",
         "watch": "tsc -watch -p ./",
         "lint": "eslint src --ext ts"
     },
