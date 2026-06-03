@@ -43,14 +43,41 @@ jobs:
       - name: Compile
         run: npm run compile
 
-      # Version bump, commit, and tag (only on workflow_dispatch)
+      # Version bump (only on workflow_dispatch). Derives the *current* highest
+      # version from git tags (NOT package.json) so a previous bump-push that
+      # silently failed (e.g. branch protection) can't desync us. Writes the
+      # new version into package.json in-place, then attempts to push it back
+      # to master — but proceeds with the release even if the push is blocked,
+      # since the tag is the source of truth.
       - name: Bump version and create tag
         if: github.event_name == 'workflow_dispatch'
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          npm version ${{ github.event.inputs.bump }} -m "chore: release v%s"
-          git push origin HEAD:${{ github.ref_name }}
+
+          # Highest existing semver tag (strip leading v). Empty if no tags.
+          LATEST_TAG=$(git tag --list 'v*' | sed 's/^v//' \
+            | awk -F. '{printf "%010d.%010d.%010d %s.%s.%s\n",$1,$2,$3,$1,$2,$3}' \
+            | sort | tail -1 | awk '{print $2}')
+          if [ -z "$LATEST_TAG" ]; then
+            CURRENT=$(node -p "require('./package.json').version")
+          else
+            CURRENT="$LATEST_TAG"
+          fi
+          echo "Current released version (from tags): $CURRENT"
+
+          # Sync package.json to the latest tag before bumping.
+          npm version --no-git-tag-version "$CURRENT" --allow-same-version
+
+          # Now bump from the synced state.
+          NEW=$(npm version ${{ github.event.inputs.bump }} -m "chore: release v%s" | tail -1)
+          echo "Bumped to: $NEW"
+
+          # Best-effort push of the bump commit to master. Don't fail the run
+          # if branch protection blocks it — the tag is what really matters.
+          git push origin HEAD:${{ github.ref_name }} || \
+            echo "::warning::Could not push version bump commit to ${{ github.ref_name }} (branch protection?). The tag still went out; sync package.json manually if needed."
           git push origin --tags
 
       # Get version for release name
